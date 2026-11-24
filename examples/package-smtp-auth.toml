@@ -1,0 +1,16 @@
+# Package for a group that sends through an authenticated SMTP server.
+# Use a dedicated low-privilege mailbox that can only send, and a separate
+# account (or at least a separate package and share) per group.
+
+[package]
+serial = 2026112402
+description = "Branch offices - authenticated SMTP"
+
+[smtp]
+host = "smtp.example.com"
+port = 587
+encryption = "starttls"
+username = "rdp-monitor-branch@example.com"
+password = "REPLACE-ME"
+from = "rdp-monitor-branch@example.com"
+to = ["it-alerts@example.com"]

@@ -1,0 +1,23 @@
+[package]
+name = "rdpmon-svc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RDP Monitor Windows service and administration command line"
+
+[[bin]]
+name = "rdpmon-svc"
+path = "src/main.rs"
+
+[dependencies]
+rdpmon-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+semver.workspace = true
+roxmltree.workspace = true
+rusqlite.workspace = true
+windows-service.workspace = true
+lettre.workspace = true
+windows-sys.workspace = true
+sha2.workspace = true

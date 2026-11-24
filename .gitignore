@@ -1,0 +1,13 @@
+/target/
+/dist/
+/installer/.wix/
+/installer/bin/
+/installer/obj/
+*.wixpdb
+# Never commit signing keys or signed packages with secrets
+*.key
+*.rdpcfg
+*.mst
+.env
+.env.*
+!.env.example

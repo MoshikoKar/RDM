@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = ["crates/rdpmon-core", "crates/rdpmon-svc", "crates/rdpmon-config", "crates/rdpmon-tool"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "Proprietary"
+rust-version = "1.80"
+
+[workspace.dependencies]
+rdpmon-core = { path = "crates/rdpmon-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+ed25519-dalek = "2.1"
+argon2 = "0.5"
+getrandom = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+semver = "1"
+roxmltree = "0.20"
+rusqlite = { version = "0.32", features = ["bundled"] }
+windows-service = "0.8"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "native-tls", "hostname"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_EventLog",
+    "Win32_System_IO",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_Console",
+    "Win32_Networking_WinHttp",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+# A panic in any worker thread terminates the process so that the Windows
+# Service Recovery policy restarts it, instead of silently losing a thread.
+panic = "abort"

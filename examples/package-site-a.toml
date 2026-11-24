@@ -1,0 +1,41 @@
+# Configuration package payload for one group of computers ("Site A").
+# Sign it with:   rdpmon-tool sign-config --key cfg.key --in package-site-a.toml --out site-a.rdpcfg
+# Apply it with:  msiexec ... CONFIG_PACKAGE=\\server\share\site-a.rdpcfg   (installation)
+#            or:  "C:\Program Files\RDP Monitor\rdpmon-svc.exe" import site-a.rdpcfg   (installed agents)
+#
+# Only the sections and keys present here are changed; lists are replaced whole.
+# Packages are signed (authentic) but NOT encrypted: anyone who can read the
+# .rdpcfg file can read any secret in it. Restrict the share and see
+# docs/DEPLOYMENT.md "Secrets in packages".
+
+[package]
+# Must increase with every new package for this group; older packages are rejected.
+# Convention: YYYYMMDDnn
+serial = 2026112401
+description = "Site A - main office workstations"
+# new_trusted_config_key = "<base64>"   # rotate the package-signing key (signed with the current key)
+
+[smtp]
+host = "smtp-relay.example.com"
+port = 25
+encryption = "none"
+from = "rdp-monitor@example.com"
+to = ["it-alerts@example.com", "soc@example.com"]
+
+[notifications]
+cooldown_minutes = 15
+notify_reconnects = true
+
+[report]
+enabled = true
+day = "monday"
+time = "08:00"
+
+[security]
+# Generated with `rdpmon-tool hash-password`. Example value only - do not use.
+admin_password_hash = "$argon2id$v=19$m=19456,t=2,p=1$ZXhhbXBsZXNhbHQxMjM0NQ$eXGdLqFL7SOtUdRj2+AcwBBuoYNnE1b0bKNp6IJ4nO0"
+
+[updates]
+provider = "gitlab"
+repository_url = "https://gitlab.example.com/it/rdp-monitor"
+signing_public_key = "REPLACE-WITH-BASE64-RELEASE-PUBLIC-KEY"

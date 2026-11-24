@@ -1,0 +1,61 @@
+# RDP Monitor - every setting with its default value.
+#
+# This is the format used inside signed configuration packages (see
+# package-site-a.toml) and shown by the configuration utility. The agent itself
+# never reads a plain TOML file: its configuration is stored encrypted in
+# C:\ProgramData\RDP Monitor\config.dat and changed only through the
+# configuration utility or signed packages.
+#
+# No real servers, addresses or credentials appear in this file.
+
+[smtp]
+host = "mail.example.com"        # host name or IP address; empty = email disabled
+port = 25                        # 25 relay, 587 STARTTLS, 465 implicit TLS
+encryption = "none"              # "none" | "starttls" | "tls"
+username = ""                    # empty = no SMTP authentication (requires starttls or tls when set)
+password = ""                    # secret; never shown again after saving
+from = "rdp-monitor@example.com"
+to = ["it-alerts@example.com"]
+cc = []
+bcc = []
+timeout_seconds = 30
+
+[notifications]
+subject_format = "RDP ALERT: {user} from {ip} on {host}"   # {user} {domain} {ip} {host} {type} {time}
+notify_new_logons = true
+notify_reconnects = true
+cooldown_minutes = 15            # per user + source IP; 0 = email every distinct connection
+max_queue = 500                  # undelivered emails kept; the oldest is dropped beyond this
+retry_hours = 72                 # stop retrying an email after this long
+
+[monitoring]
+security_log = true              # 4624 (LogonType 10), 4778, 4779
+session_manager_log = true       # LocalSessionManager 21, 24, 25
+auth_log = true                  # RemoteConnectionManager 1149 (evidence only)
+ignore_loopback = false          # true = ignore 127.0.0.1 / ::1 (tunnelled RDP arrives from loopback)
+recovery_max_hours = 168         # after a restart, recover missed events up to 7 days old
+correlation_window_seconds = 30  # events of one connection arrive within this window
+
+[report]
+enabled = true
+day = "monday"
+time = "08:00"                   # local time, 24-hour
+period_days = 7
+recipients = []                  # empty = same as [smtp] to
+
+[retention]
+history_days = 365
+audit_days = 365
+outbox_days = 30
+
+[security]
+admin_password_hash = ""         # Argon2id hash from `rdpmon-tool hash-password`; never a plain password
+harden_service = true            # Administrators cannot stop/reconfigure/delete the service via SCM
+# trusted_config_key and last_package_serial are managed by the agent.
+
+[updates]
+provider = "none"                # "none" | "github" | "gitlab"
+repository_url = ""              # https://github.com/<owner>/<repo> or https://gitlab.example.com/<group>/<project>
+token = ""                       # secret; only for private repositories (read-only scope)
+signing_public_key = ""          # base64 Ed25519 key from `rdpmon-tool keygen release`
+allow_prerelease = false

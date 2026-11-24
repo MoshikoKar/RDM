@@ -1,0 +1,16 @@
+[package]
+name = "rdpmon-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offline key management and signing tool for RDP Monitor administrators (not installed on endpoints)"
+
+[[bin]]
+name = "rdpmon-tool"
+path = "src/main.rs"
+
+[dependencies]
+rdpmon-core.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+windows-sys.workspace = true
