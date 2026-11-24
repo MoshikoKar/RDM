@@ -26,7 +26,7 @@ before email is configured.
 **Silent / GPO / Vicarius:** see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ```powershell
-msiexec /i RDPMonitor-1.0.0-x64.msi /qn /norestart /l*v C:\Windows\Temp\rdpmon-install.log `
+msiexec /i RDPMonitor-0.1.0-x64.msi /qn /norestart /l*v C:\Windows\Temp\rdpmon-install.log `
   TRUSTED_CONFIG_KEY="<base64 public key>" CONFIG_PACKAGE="\\server\share\rdpmon\site-a.rdpcfg"
 ```
 
@@ -92,11 +92,14 @@ refused. See [docs/UPDATES.md](docs/UPDATES.md).
 
 ## Remove
 
-Removal is password-protected: open the configuration utility, **Security >
-Authorize uninstall**, then remove *RDP Monitor* in Settings > Apps within 10
-minutes (or `msiexec /x RDPMonitor-<version>-x64.msi /qn`). History and settings in
-`C:\ProgramData\RDP Monitor` are kept; delete that folder to erase them
-(see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#removing-all-data)).
+Removal is password-protected. Use **Uninstall RDP Monitor** from the Start
+menu (or `"C:\Program Files\RDP Monitor\rdpmon-svc.exe" uninstall`), enter the
+administration password, and confirm; the service is stopped and the product
+is removed. Alternatively, in the configuration utility under **Security**,
+enter the password and choose **Uninstall now**, or **Authorize uninstall only**
+and then remove *RDP Monitor* in Settings > Apps within 10 minutes.
+History and settings in `C:\ProgramData\RDP Monitor` are kept; delete that
+folder to erase them (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#removing-all-data)).
 
 ## Security
 

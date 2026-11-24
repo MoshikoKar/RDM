@@ -21,6 +21,10 @@ Usage:
   rdpmon-svc provision [--trusted-key <base64>] [--package <file.rdpcfg>]
                                      installer use only (runs as SYSTEM while the service is stopped)
   rdpmon-svc uninstall-check         installer use only
+  rdpmon-svc authorize-uninstall     prompt for the administration password and open the
+                                     10-minute removal window (does not remove the product)
+  rdpmon-svc uninstall               prompt for the administration password, stop the service
+                                     and remove RDP Monitor (msiexec)
   rdpmon-svc reset                   SYSTEM only: return an agent whose protected configuration
                                      was lost to first-run setup (audited)
   rdpmon-svc console [--data-dir <dir>]  run in the foreground for troubleshooting
@@ -254,4 +258,121 @@ pub fn provision(args: &[String]) -> i32 {
     logging::info(&format!("provision: {detail}"));
     println!("{detail}");
     0
+}
+
+
+fn read_secret(prompt: &str) -> String {
+    use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE};
+    use std::io::{BufRead, Write};
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    let mut mode = 0u32;
+    let have_console = unsafe { GetConsoleMode(h, &mut mode) } != 0;
+    if have_console {
+        unsafe { SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT) };
+    }
+    let mut s = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut s);
+    if have_console {
+        unsafe { SetConsoleMode(h, mode) };
+        eprintln!();
+    }
+    s.trim_end_matches(['\r', '\n']).to_string()
+}
+
+/// Verifies the administration password and opens the MSI removal window.
+pub fn authorize_uninstall() -> i32 {
+    let password = read_secret("Administration password: ");
+    if password.is_empty() {
+        eprintln!("Password is required.");
+        return 2;
+    }
+    match ipc::call(&Request::AuthorizeUninstallWithPassword { password }) {
+        Ok(Response::Ok { message }) => {
+            println!("{message}");
+            0
+        }
+        Ok(Response::Error { message }) => {
+            eprintln!("{message}");
+            1
+        }
+        Ok(other) => {
+            eprintln!("unexpected response: {other:?}");
+            6
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            6
+        }
+    }
+}
+
+fn product_code() -> Result<String, String> {
+    use std::process::Command;
+    let script = r#"
+$paths = @(
+  'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+$app = Get-ItemProperty $paths -ErrorAction SilentlyContinue |
+  Where-Object { $_.DisplayName -eq 'RDP Monitor' } |
+  Select-Object -First 1
+if (-not $app) { exit 2 }
+Write-Output $app.PSChildName
+"#;
+    let out = Command::new("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .output()
+        .map_err(|e| format!("cannot look up the installed product: {e}"))?;
+    if !out.status.success() {
+        return Err("RDP Monitor is not installed.".into());
+    }
+    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if code.is_empty() || !code.starts_with('{') {
+        return Err("RDP Monitor is not installed.".into());
+    }
+    Ok(code)
+}
+
+/// Interactive removal: password -> authorize -> msiexec (stops the service).
+pub fn uninstall() -> i32 {
+    let auth = authorize_uninstall();
+    if auth != 0 {
+        return auth;
+    }
+    let code = match product_code() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return 6;
+        }
+    };
+    let log = std::env::temp_dir().join("RDPMonitor-uninstall.log");
+    println!("Stopping RDP Monitor and removing the product ({code})...");
+    let status = std::process::Command::new(r"C:\Windows\System32\msiexec.exe")
+        .args([
+            "/x",
+            &code,
+            "/qb",
+            "/norestart",
+            "/l*v",
+            &log.to_string_lossy(),
+        ])
+        .status();
+    match status {
+        Ok(s) => {
+            let code = s.code().unwrap_or(1);
+            if code == 0 {
+                println!("RDP Monitor was removed. Log: {}", log.display());
+            } else {
+                eprintln!("msiexec exit code {code}. Log: {}", log.display());
+            }
+            code
+        }
+        Err(e) => {
+            eprintln!("cannot start msiexec: {e}");
+            6
+        }
+    }
 }

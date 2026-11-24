@@ -77,6 +77,7 @@ export component AppWindow inherits Window {
     in-out property <string> current-password;
     in-out property <string> new-password;
     in-out property <string> confirm-password;
+    in-out property <string> uninstall-password;
 
     // email
     in-out property <string> smtp-host;
@@ -130,6 +131,7 @@ export component AppWindow inherits Window {
     callback change-password();
     callback restart-monitoring();
     callback authorize-uninstall();
+    callback uninstall-now();
     callback load-audit();
     callback check-updates();
     callback install-update();
@@ -852,12 +854,28 @@ export component AppWindow inherits Window {
                                 text: "Remove RDP Monitor";
                             }
                             Hint {
-                                text: "Removing RDP Monitor through Settings > Apps is blocked unless it was authorized here within the last 10 minutes.";
+                                text: "Enter the administration password to stop the RDPMonitor service and uninstall the application. You can also authorize removal and then use Settings > Apps within 10 minutes.";
+                            }
+                            Row {
+                                label: "Admin password";
+                                LineEdit {
+                                    text <=> root.uninstall-password;
+                                    input-type: password;
+                                    placeholder-text: "Administration password";
+                                }
                             }
                             HorizontalLayout {
                                 alignment: start;
+                                spacing: 8px;
                                 Button {
-                                    text: "Authorize uninstall";
+                                    text: "Uninstall now";
+                                    enabled: !root.busy && root.uninstall-password != "";
+                                    clicked => {
+                                        root.uninstall-now();
+                                    }
+                                }
+                                Button {
+                                    text: "Authorize uninstall only";
                                     enabled: !root.busy;
                                     clicked => {
                                         root.authorize-uninstall();

@@ -82,7 +82,7 @@ pub struct NotificationConfig {
 impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
-            subject_format: "RDP ALERT: {user} from {ip} on {host}".into(),
+            subject_format: "RDP ALERT: {user} from {ip} to {host}".into(),
             notify_new_logons: true,
             notify_reconnects: true,
             cooldown_minutes: 15,

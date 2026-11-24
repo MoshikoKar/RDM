@@ -93,6 +93,8 @@ fn main() {
         Some("import") => cli::import(rest),
         Some("provision") => cli::provision(rest),
         Some("uninstall-check") => cli::uninstall_check(),
+        Some("authorize-uninstall") => cli::authorize_uninstall(),
+        Some("uninstall") => cli::uninstall(),
         Some("reset") => cli::reset(),
         Some("version" | "--version") => {
             println!("rdpmon-svc {}", rdpmon_core::VERSION);

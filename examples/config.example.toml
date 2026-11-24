@@ -21,7 +21,7 @@ bcc = []
 timeout_seconds = 30
 
 [notifications]
-subject_format = "RDP ALERT: {user} from {ip} on {host}"   # {user} {domain} {ip} {host} {type} {time}
+subject_format = "RDP ALERT: {user} from {ip} to {host}"   # {user} {domain} {ip} {host} {type} {time}
 notify_new_logons = true
 notify_reconnects = true
 cooldown_minutes = 15            # per user + source IP; 0 = email every distinct connection

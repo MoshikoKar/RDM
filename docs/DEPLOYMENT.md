@@ -211,10 +211,17 @@ package.
 
 ## 8. Removal
 
-Removal must be authorized:
+Removal must be authorized. The MSI stops the `RDPMonitor` service as part of
+uninstall.
 
-- **Interactive**: configuration utility > Security > *Authorize uninstall*, then
-  Settings > Apps > RDP Monitor > Uninstall within 10 minutes.
+- **Interactive (password)**: Start menu > *Uninstall RDP Monitor*, or
+  `"C:\Program Files\RDP Monitor\rdpmon-svc.exe" uninstall`, or configuration
+  utility > Security > enter the administration password > *Uninstall now*.
+  Each option verifies the password, opens the removal window, then runs
+  msiexec (service stop + product removal).
+- **Interactive (two-step)**: configuration utility > Security >
+  *Authorize uninstall only*, then Settings > Apps > RDP Monitor > Uninstall
+  within 10 minutes.
 - **Silent (GPO / Vicarius)**: sign a package with a new, higher serial:
 
   ```toml
@@ -226,7 +233,8 @@ Removal must be authorized:
 
   and run `scripts\deploy\Uninstall-RDPMonitor.ps1 -AuthorizationPackage <file>`
   as SYSTEM. It imports the package (opening a 10-minute window) and runs
-  `msiexec /x {product code} /qn`.
+  `msiexec /x {product code} /qb`. Without `-AuthorizationPackage` the same
+  script prompts for the administration password.
 
 An unauthorized removal fails with exit code 1603 and is recorded in the audit
 log. Upgrades are never blocked.

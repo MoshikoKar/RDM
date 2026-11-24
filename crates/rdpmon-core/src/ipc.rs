@@ -33,6 +33,9 @@ pub enum Request {
     InstallUpdate { token: String, version: String },
     RestartMonitoring { token: String },
     AuthorizeUninstall { token: String },
+    /// Opens the removal window after verifying the administration password
+    /// (interactive uninstaller; does not require an existing session token).
+    AuthorizeUninstallWithPassword { password: String },
     /// Asked by the MSI during removal (runs as SYSTEM).
     CheckUninstall,
     /// Authenticated by the package signature, not by password.

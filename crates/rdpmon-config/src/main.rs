@@ -87,6 +87,41 @@ fn channel_label(name: &str) -> &str {
     }
 }
 
+
+fn product_code() -> Result<String, String> {
+    let script = r#"
+$paths = @(
+  'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+$app = Get-ItemProperty $paths -ErrorAction SilentlyContinue |
+  Where-Object { $_.DisplayName -eq 'RDP Monitor' } |
+  Select-Object -First 1
+if (-not $app) { exit 2 }
+Write-Output $app.PSChildName
+"#;
+    let out = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .output()
+        .map_err(|e| format!("cannot look up the installed product: {e}"))?;
+    if !out.status.success() {
+        return Err("RDP Monitor is not installed.".into());
+    }
+    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if code.is_empty() || !code.starts_with('{') {
+        return Err("RDP Monitor is not installed.".into());
+    }
+    Ok(code)
+}
+
+fn run_msiexec_uninstall(code: &str) -> Result<i32, String> {
+    let log = std::env::temp_dir().join("RDPMonitor-uninstall.log");
+    let status = std::process::Command::new(r"C:\Windows\System32\msiexec.exe")
+        .args(["/x", code, "/qb", "/norestart", "/l*v", &log.to_string_lossy()])
+        .status()
+        .map_err(|e| format!("cannot start msiexec: {e}"))?;
+    Ok(status.code().unwrap_or(1))
+}
 fn fill_status(ui: &AppWindow, s: &StatusInfo) {
     ui.set_version(s.version.clone().into());
     ui.set_hostname(s.hostname.clone().into());
@@ -461,6 +496,39 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     });
+    ui.on_uninstall_now({
+        let w = ui.as_weak();
+        move || {
+            let Some(ui) = w.upgrade() else { return };
+            let password = ui.get_uninstall_password().to_string();
+            if password.is_empty() {
+                show(&ui, "Enter the administration password to uninstall.", true);
+                return;
+            }
+            ui.set_uninstall_password("".into());
+            bg(&ui, move || {
+                match call(Request::AuthorizeUninstallWithPassword { password }) {
+                    Ok(Response::Ok { .. }) => match product_code() {
+                        Ok(code) => run_msiexec_uninstall(&code).map(|c| {
+                            if c == 0 {
+                                "RDP Monitor was removed. The service has been stopped.".to_string()
+                            } else {
+                                format!("Removal finished with msiexec exit code {c}. Check %TEMP%\\RDPMonitor-uninstall.log.")
+                            }
+                        }),
+                        Err(e) => Err(e),
+                    },
+                    Ok(Response::Error { message }) => Err(message),
+                    Ok(_) => Err("Unexpected response from the service.".into()),
+                    Err(e) => Err(e),
+                }
+            }, |ui, r| match r {
+                Ok(msg) => show(ui, msg, false),
+                Err(e) => show(ui, e, true),
+            });
+        }
+    });
+
 
     ui.on_load_audit({
         let w = ui.as_weak();

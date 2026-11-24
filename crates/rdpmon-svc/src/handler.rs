@@ -127,9 +127,10 @@ pub fn handle(sh: &Shared, db: &Db, req: Request, cl: &Client) -> Response {
         }
         Request::AuthorizeUninstall { token } => {
             require!(token);
-            *sh.uninstall_authorized_until.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + Duration::from_secs(600));
-            let _ = db.audit("admin", "uninstall authorized", &format!("for 10 minutes by {who}"));
-            Response::ok("Uninstallation is authorized for the next 10 minutes. Remove RDP Monitor from Settings > Apps now.")
+            authorize_uninstall(sh, db, &who)
+        }
+        Request::AuthorizeUninstallWithPassword { password } => {
+            authorize_uninstall_with_password(sh, db, &password, cl, &who)
         }
         Request::CheckUninstall => {
             let ok = sh.uninstall_authorized_until.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| t > Instant::now());
@@ -140,6 +141,37 @@ pub fn handle(sh: &Shared, db: &Db, req: Request, cl: &Client) -> Response {
     }
 }
 
+
+fn authorize_uninstall(sh: &Shared, db: &Db, who: &str) -> Response {
+    *sh.uninstall_authorized_until.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + Duration::from_secs(600));
+    let _ = db.audit("admin", "uninstall authorized", &format!("for 10 minutes by {who}"));
+    Response::ok("Uninstallation is authorized for the next 10 minutes. The service will be stopped when removal starts.")
+}
+
+fn authorize_uninstall_with_password(sh: &Shared, db: &Db, pw: &str, cl: &Client, who: &str) -> Response {
+    let now = Instant::now();
+    let mut auth = sh.auth.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(d) = auth.locked_for(now) {
+        let _ = db.audit("auth", "uninstall blocked", &format!("locked out, attempt by {who}"));
+        return Response::err(format!("Too many failed attempts. Try again in {} seconds.", d.as_secs() + 1));
+    }
+    let hash = sh.cfg().security.admin_password_hash;
+    if hash.is_empty() {
+        return Response::err(if db.initialized() { CONFIG_LOST } else { "No administration password is set yet. Complete the initial setup first." });
+    }
+    if !password::verify(pw, &hash) {
+        auth.record_failure(now);
+        let n = auth.failures();
+        drop(auth);
+        let _ = db.audit("auth", "uninstall password failed", &format!("wrong password from {who} (consecutive failures: {n})"));
+        logging::warn(&format!("failed uninstall authorization from {who}"));
+        return Response::err("Incorrect password.");
+    }
+    // Successful verification clears the failure streak for this client path.
+    let _ = auth.new_session(cl.pid, now);
+    drop(auth);
+    authorize_uninstall(sh, db, &who)
+}
 fn status(sh: &Shared, db: &Db) -> StatusInfo {
     let cfg = sh.cfg();
     let (pending, failed) = db.outbox_counts().unwrap_or((0, 0));
@@ -559,6 +591,24 @@ mod tests {
         assert!(matches!(handle(&sh, &db, R::CheckUninstall, &cl()), Response::Uninstall { authorized: false }));
         let t = token(handle(&sh, &db, R::InitialSetup { password: "Good-Passw0rd".into(), config: valid_cfg() }, &cl()));
         handle(&sh, &db, R::AuthorizeUninstall { token: t }, &cl());
+        assert!(matches!(handle(&sh, &db, R::CheckUninstall, &cl()), Response::Uninstall { authorized: true }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn uninstall_with_password_authorizes_removal() {
+        let (sh, db, dir) = setup();
+        handle(&sh, &db, R::InitialSetup { password: "Good-Passw0rd".into(), config: valid_cfg() }, &cl());
+        *sh.uninstall_authorized_until.lock().unwrap() = None;
+        assert!(matches!(
+            handle(&sh, &db, R::AuthorizeUninstallWithPassword { password: "wrong".into() }, &cl()),
+            Response::Error { .. }
+        ));
+        assert!(matches!(handle(&sh, &db, R::CheckUninstall, &cl()), Response::Uninstall { authorized: false }));
+        assert!(matches!(
+            handle(&sh, &db, R::AuthorizeUninstallWithPassword { password: "Good-Passw0rd".into() }, &cl()),
+            Response::Ok { .. }
+        ));
         assert!(matches!(handle(&sh, &db, R::CheckUninstall, &cl()), Response::Uninstall { authorized: true }));
         let _ = std::fs::remove_dir_all(dir);
     }

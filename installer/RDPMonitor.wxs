@@ -67,6 +67,19 @@
       <Component Id="DocsComponent" Bitness="always64">
         <File Id="Readme" Source="$(var.DocDir)\README.md" KeyPath="yes" />
       </Component>
+      <Component Id="UninstallPs1Component" Bitness="always64">
+        <File Id="UninstallPs1" Source="$(var.DocDir)\scripts\deploy\Uninstall-RDPMonitor.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="UninstallCmdComponent" Bitness="always64">
+        <File Id="UninstallCmd" Source="$(var.InstallerDir)\uninstall.cmd" KeyPath="yes">
+          <Shortcut Id="UninstallShortcut"
+                    Directory="ProgramMenuFolder"
+                    Name="Uninstall RDP Monitor"
+                    Description="Enter the administration password to stop RDP Monitor and uninstall"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Advertise="yes" />
+        </File>
+      </Component>
     </ComponentGroup>
 
     <StandardDirectory Id="ProgramMenuFolder" />
