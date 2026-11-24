@@ -46,6 +46,7 @@ component NavItem inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: "RDP Monitor Configuration";
+    icon: @image-url("../../../assets/rdpmon.png");
     preferred-width: 960px;
     preferred-height: 680px;
     min-width: 780px;
@@ -854,7 +855,7 @@ export component AppWindow inherits Window {
                                 text: "Remove RDP Monitor";
                             }
                             Hint {
-                                text: "Enter the administration password to stop the RDPMonitor service and uninstall the application. You can also authorize removal and then use Settings > Apps within 10 minutes.";
+                                text: "Enter the administration password to stop the RDPMonitor service and uninstall the application. This window closes and Windows Installer shows the removal progress. You can also authorize removal and then use Settings > Apps within 10 minutes.";
                             }
                             Row {
                                 label: "Admin password";

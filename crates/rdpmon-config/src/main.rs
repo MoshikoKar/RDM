@@ -88,40 +88,21 @@ fn channel_label(name: &str) -> &str {
 }
 
 
-fn product_code() -> Result<String, String> {
-    let script = r#"
-$paths = @(
-  'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-)
-$app = Get-ItemProperty $paths -ErrorAction SilentlyContinue |
-  Where-Object { $_.DisplayName -eq 'RDP Monitor' } |
-  Select-Object -First 1
-if (-not $app) { exit 2 }
-Write-Output $app.PSChildName
-"#;
-    let out = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
-        .output()
-        .map_err(|e| format!("cannot look up the installed product: {e}"))?;
-    if !out.status.success() {
-        return Err("RDP Monitor is not installed.".into());
-    }
-    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if code.is_empty() || !code.starts_with('{') {
-        return Err("RDP Monitor is not installed.".into());
-    }
-    Ok(code)
+
+/// Starts the removal without waiting for it: this utility lives in the
+/// installation folder, so it must exit to let msiexec remove it (otherwise
+/// the file is in use, removal needs a reboot and Restart Manager may close
+/// the window mid-operation). msiexec shows its own progress and errors.
+fn start_msiexec_uninstall(code: &str) -> Result<(), String> {
+    let log = std::env::temp_dir().join("RDPMonitor-uninstall.log");
+    std::process::Command::new(r"C:\Windows\System32\msiexec.exe")
+        .args(["/x", code, "/qb", "/norestart", "/l*v", &log.to_string_lossy()])
+        .current_dir(std::env::temp_dir())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("cannot start msiexec: {e}"))
 }
 
-fn run_msiexec_uninstall(code: &str) -> Result<i32, String> {
-    let log = std::env::temp_dir().join("RDPMonitor-uninstall.log");
-    let status = std::process::Command::new(r"C:\Windows\System32\msiexec.exe")
-        .args(["/x", code, "/qb", "/norestart", "/l*v", &log.to_string_lossy()])
-        .status()
-        .map_err(|e| format!("cannot start msiexec: {e}"))?;
-    Ok(status.code().unwrap_or(1))
-}
 fn fill_status(ui: &AppWindow, s: &StatusInfo) {
     ui.set_version(s.version.clone().into());
     ui.set_hostname(s.hostname.clone().into());
@@ -508,14 +489,8 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_uninstall_password("".into());
             bg(&ui, move || {
                 match call(Request::AuthorizeUninstallWithPassword { password }) {
-                    Ok(Response::Ok { .. }) => match product_code() {
-                        Ok(code) => run_msiexec_uninstall(&code).map(|c| {
-                            if c == 0 {
-                                "RDP Monitor was removed. The service has been stopped.".to_string()
-                            } else {
-                                format!("Removal finished with msiexec exit code {c}. Check %TEMP%\\RDPMonitor-uninstall.log.")
-                            }
-                        }),
+                    Ok(Response::Ok { .. }) => match rdpmon_core::msi::installed_product_code() {
+                        Ok(code) => start_msiexec_uninstall(&code),
                         Err(e) => Err(e),
                     },
                     Ok(Response::Error { message }) => Err(message),
@@ -523,7 +498,14 @@ fn main() -> Result<(), slint::PlatformError> {
                     Err(e) => Err(e),
                 }
             }, |ui, r| match r {
-                Ok(msg) => show(ui, msg, false),
+                Ok(()) => {
+                    // Release the session and close so msiexec can remove this program.
+                    if let Some(t) = state().token.take() {
+                        let _ = call(Request::Logout { token: t });
+                    }
+                    let _ = ui.hide();
+                    let _ = slint::quit_event_loop();
+                }
                 Err(e) => show(ui, e, true),
             });
         }

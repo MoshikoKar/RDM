@@ -4,6 +4,7 @@
 pub mod config;
 pub mod crypto;
 pub mod ipc;
+pub mod msi;
 pub mod package;
 pub mod password;
 pub mod paths;

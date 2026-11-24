@@ -130,7 +130,7 @@ pub fn handle(sh: &Shared, db: &Db, req: Request, cl: &Client) -> Response {
             authorize_uninstall(sh, db, &who)
         }
         Request::AuthorizeUninstallWithPassword { password } => {
-            authorize_uninstall_with_password(sh, db, &password, cl, &who)
+            authorize_uninstall_with_password(sh, db, &password, &who)
         }
         Request::CheckUninstall => {
             let ok = sh.uninstall_authorized_until.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| t > Instant::now());
@@ -148,7 +148,7 @@ fn authorize_uninstall(sh: &Shared, db: &Db, who: &str) -> Response {
     Response::ok("Uninstallation is authorized for the next 10 minutes. The service will be stopped when removal starts.")
 }
 
-fn authorize_uninstall_with_password(sh: &Shared, db: &Db, pw: &str, cl: &Client, who: &str) -> Response {
+fn authorize_uninstall_with_password(sh: &Shared, db: &Db, pw: &str, who: &str) -> Response {
     let now = Instant::now();
     let mut auth = sh.auth.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(d) = auth.locked_for(now) {
@@ -167,10 +167,10 @@ fn authorize_uninstall_with_password(sh: &Shared, db: &Db, pw: &str, cl: &Client
         logging::warn(&format!("failed uninstall authorization from {who}"));
         return Response::err("Incorrect password.");
     }
-    // Successful verification clears the failure streak for this client path.
-    let _ = auth.new_session(cl.pid, now);
+    // No session is created: this request only opens the removal window.
+    auth.clear_failures();
     drop(auth);
-    authorize_uninstall(sh, db, &who)
+    authorize_uninstall(sh, db, who)
 }
 fn status(sh: &Shared, db: &Db) -> StatusInfo {
     let cfg = sh.cfg();

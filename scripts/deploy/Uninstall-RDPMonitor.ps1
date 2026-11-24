@@ -52,6 +52,7 @@ if ($AuthorizationPackage) {
 $code = $app.PSChildName
 $log = Join-Path $LogDir "RDPMonitor-uninstall.log"
 Write-Host "Stopping RDP Monitor and removing the product..."
+Set-Location $env:TEMP   # never hold the installation folder open during removal
 $p = Start-Process -FilePath "$env:WINDIR\System32\msiexec.exe" -ArgumentList @("/x", $code, "/qb", "/norestart", "/l*v", "`"$log`"") -Wait -PassThru
 Write-Output "msiexec exit code $($p.ExitCode); log: $log"
 exit $p.ExitCode

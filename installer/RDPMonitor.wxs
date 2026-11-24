@@ -32,6 +32,9 @@
 
     <!-- ARPNOMODIFY=1 is set by WixUI_Minimal. -->
     <Property Id="ARPCOMMENTS" Value="Monitors Remote Desktop connections and sends email notifications." />
+    <!-- Icon for Settings > Apps / Programs and Features and the Start menu shortcuts. -->
+    <Icon Id="RDPMonitor.ico" SourceFile="$(var.DocDir)\assets\rdpmon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="RDPMonitor.ico" />
     <Property Id="TRUSTED_CONFIG_KEY" Secure="yes" />
     <Property Id="CONFIG_PACKAGE" Secure="yes" />
 
@@ -61,6 +64,7 @@
                     Name="RDP Monitor Configuration"
                     Description="Configure RDP Monitor"
                     WorkingDirectory="INSTALLFOLDER"
+                    Icon="RDPMonitor.ico"
                     Advertise="yes" />
         </File>
       </Component>
@@ -76,13 +80,15 @@
                     Directory="ProgramMenuFolder"
                     Name="Uninstall RDP Monitor"
                     Description="Enter the administration password to stop RDP Monitor and uninstall"
-                    WorkingDirectory="INSTALLFOLDER"
+                    WorkingDirectory="TempFolder"
+                    Icon="RDPMonitor.ico"
                     Advertise="yes" />
         </File>
       </Component>
     </ComponentGroup>
 
     <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="TempFolder" />
 
     <Feature Id="Main" Title="RDP Monitor" AllowAbsent="no">
       <ComponentGroupRef Id="Product" />

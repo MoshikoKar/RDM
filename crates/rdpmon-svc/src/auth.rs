@@ -40,9 +40,14 @@ impl Auth {
         self.failures
     }
 
-    pub fn new_session(&mut self, pid: u32, now: Instant) -> String {
+    /// A correct password ends the failure streak.
+    pub fn clear_failures(&mut self) {
         self.failures = 0;
         self.locked_until = None;
+    }
+
+    pub fn new_session(&mut self, pid: u32, now: Instant) -> String {
+        self.clear_failures();
         self.sessions.retain(|_, s| now.duration_since(s.last_used) < SESSION_IDLE);
         let token = rdpmon_core::crypto::random_hex(32);
         self.sessions.insert(token.clone(), Session { pid, last_used: now });

@@ -7,33 +7,33 @@ an update never downloads or applies configuration.
 ## Publishing a release
 
 1. Set the new version in `Cargo.toml` (`[workspace.package] version`, semantic
-   versioning, e.g. `1.1.0`).
+   versioning, e.g. `0.1.2`).
 2. Build and sign on a secured build machine:
 
    ```powershell
    .\scripts\build.ps1 -ReleaseKey D:\keys\release.key [-CertThumbprint <code-signing cert>]
    ```
 
-   This produces `dist\RDPMonitor-1.1.0-x64.msi` and `dist\RDPMonitor-1.1.0-x64.msi.sig`.
-   Check it: `rdpmon-tool verify-release --pub release.pub --file dist\RDPMonitor-1.1.0-x64.msi --version 1.1.0`
-3. Publish a release whose tag is the version (`v1.1.0` or `1.1.0`) with **both
+   This produces `dist\RDPMonitor-0.1.2-x64.msi` and `dist\RDPMonitor-0.1.2-x64.msi.sig`.
+   Check it: `rdpmon-tool verify-release --pub release.pub --file dist\RDPMonitor-0.1.2-x64.msi --version 0.1.2`
+3. Publish a release whose tag is the version (`v0.1.2` or `0.1.2`) with **both
    files attached under exactly these names**.
 
    GitHub:
    ```powershell
-   gh release create v1.1.0 dist\RDPMonitor-1.1.0-x64.msi dist\RDPMonitor-1.1.0-x64.msi.sig --notes-file notes.md
+   gh release create v0.1.2 dist\RDPMonitor-0.1.2-x64.msi dist\RDPMonitor-0.1.2-x64.msi.sig --notes-file notes.md
    ```
 
    GitLab (generic package registry + release links), with `$P` = project ID and a token with `api` scope:
    ```powershell
    $h = @{ "PRIVATE-TOKEN" = $env:GITLAB_TOKEN }
    $base = "https://gitlab.example.com/api/v4/projects/$P"
-   foreach ($f in "RDPMonitor-1.1.0-x64.msi", "RDPMonitor-1.1.0-x64.msi.sig") {
-     Invoke-RestMethod -Method Put -Headers $h -InFile "dist\$f" -Uri "$base/packages/generic/rdp-monitor/1.1.0/$f"
+   foreach ($f in "RDPMonitor-0.1.2-x64.msi", "RDPMonitor-0.1.2-x64.msi.sig") {
+     Invoke-RestMethod -Method Put -Headers $h -InFile "dist\$f" -Uri "$base/packages/generic/rdp-monitor/0.1.2/$f"
    }
-   $links = "RDPMonitor-1.1.0-x64.msi", "RDPMonitor-1.1.0-x64.msi.sig" | ForEach-Object {
-     @{ name = $_; url = "$base/packages/generic/rdp-monitor/1.1.0/$_"; link_type = "package" } }
-   $body = @{ tag_name = "v1.1.0"; ref = "main"; description = (Get-Content notes.md -Raw); assets = @{ links = $links } } | ConvertTo-Json -Depth 5
+   $links = "RDPMonitor-0.1.2-x64.msi", "RDPMonitor-0.1.2-x64.msi.sig" | ForEach-Object {
+     @{ name = $_; url = "$base/packages/generic/rdp-monitor/0.1.2/$_"; link_type = "package" } }
+   $body = @{ tag_name = "v0.1.2"; ref = "main"; description = (Get-Content notes.md -Raw); assets = @{ links = $links } } | ConvertTo-Json -Depth 5
    Invoke-RestMethod -Method Post -Headers $h -ContentType "application/json" -Body $body -Uri "$base/releases"
    ```
    Asset links must point to the same GitLab server; links to other hosts are ignored.

@@ -144,7 +144,7 @@ pub fn uninstall_check() -> i32 {
     match ipc::call(&Request::CheckUninstall) {
         Ok(Response::Uninstall { authorized: true }) => 0,
         Ok(_) => {
-            eprintln!("Removal of RDP Monitor is not authorized. Open the RDP Monitor configuration utility, sign in, and choose Security > Authorize uninstall.");
+            eprintln!("Removal of RDP Monitor is not authorized. Use Start menu > Uninstall RDP Monitor, or the configuration utility > Security > Uninstall now / Authorize uninstall only.");
             1
         }
         Err(e) => {
@@ -308,32 +308,6 @@ pub fn authorize_uninstall() -> i32 {
     }
 }
 
-fn product_code() -> Result<String, String> {
-    use std::process::Command;
-    let script = r#"
-$paths = @(
-  'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-)
-$app = Get-ItemProperty $paths -ErrorAction SilentlyContinue |
-  Where-Object { $_.DisplayName -eq 'RDP Monitor' } |
-  Select-Object -First 1
-if (-not $app) { exit 2 }
-Write-Output $app.PSChildName
-"#;
-    let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
-        .output()
-        .map_err(|e| format!("cannot look up the installed product: {e}"))?;
-    if !out.status.success() {
-        return Err("RDP Monitor is not installed.".into());
-    }
-    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if code.is_empty() || !code.starts_with('{') {
-        return Err("RDP Monitor is not installed.".into());
-    }
-    Ok(code)
-}
 
 /// Interactive removal: password -> authorize -> msiexec (stops the service).
 pub fn uninstall() -> i32 {
@@ -341,34 +315,24 @@ pub fn uninstall() -> i32 {
     if auth != 0 {
         return auth;
     }
-    let code = match product_code() {
+    let code = match rdpmon_core::msi::installed_product_code() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
             return 6;
         }
     };
+    // Started without waiting: this executable lives in the installation
+    // folder and must exit so msiexec can remove it without a reboot.
     let log = std::env::temp_dir().join("RDPMonitor-uninstall.log");
-    println!("Stopping RDP Monitor and removing the product ({code})...");
-    let status = std::process::Command::new(r"C:\Windows\System32\msiexec.exe")
-        .args([
-            "/x",
-            &code,
-            "/qb",
-            "/norestart",
-            "/l*v",
-            &log.to_string_lossy(),
-        ])
-        .status();
-    match status {
-        Ok(s) => {
-            let code = s.code().unwrap_or(1);
-            if code == 0 {
-                println!("RDP Monitor was removed. Log: {}", log.display());
-            } else {
-                eprintln!("msiexec exit code {code}. Log: {}", log.display());
-            }
-            code
+    let started = std::process::Command::new(r"C:\Windows\System32\msiexec.exe")
+        .args(["/x", &code, "/qb", "/norestart", "/l*v", &log.to_string_lossy()])
+        .current_dir(std::env::temp_dir())
+        .spawn();
+    match started {
+        Ok(_) => {
+            println!("Windows Installer is stopping RDP Monitor and removing it ({code}). Log: {}", log.display());
+            0
         }
         Err(e) => {
             eprintln!("cannot start msiexec: {e}");

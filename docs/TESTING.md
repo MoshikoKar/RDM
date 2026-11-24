@@ -88,7 +88,7 @@ be validated on a test VM before rollout:**
 - Delivery through a real SMTP server with STARTTLS / implicit TLS and
   authentication (tests use a plain-TCP scripted server).
 - MSI interactive install and setup wizard launch, silent install with
-  `TRUSTED_CONFIG_KEY` / `CONFIG_PACKAGE`, upgrade 1.0.0 → 1.0.x with data
+  `TRUSTED_CONFIG_KEY` / `CONFIG_PACKAGE`, upgrade 0.1.1 → 0.1.x with data
   preservation, rollback, downgrade refusal, authorized and unauthorized removal.
 - In-app update download + msiexec hand-off.
 - GPO Software Installation, GPO startup script, Vicarius.
@@ -115,7 +115,7 @@ Enable reconnect auditing for 4778/4779:
 | 10 | Wrong password 6 times. | Lockout message; audit shows the failures with the Windows user name. |
 | 11 | Uninstall from Settings > Apps without authorization. | Fails; audit shows *uninstall blocked*. Authorize in Security, uninstall again: succeeds. |
 | 12 | Silent: `msiexec /i ... /qn TRUSTED_CONFIG_KEY=... CONFIG_PACKAGE=...` | Exit 0; settings from the package visible in the UI; audit *provisioned by installer*. A package signed with another key: exit 1603, nothing installed. |
-| 13 | Build version 1.0.1 (edit `Cargo.toml`), install over 1.0.0 silently. | Exit 0; settings, password, history, queue unchanged; audit *service started version 1.0.1*. Installing 1.0.0 again: exit 1638. |
+| 13 | Build version 0.1.2 (edit `Cargo.toml`), install over 0.1.1 silently. | Exit 0; settings, password, history, queue unchanged; audit *service started version 0.1.2*. Installing 0.1.1 again: exit 1638. |
 | 14 | Publish 1.0.2 + `.sig` to a test GitHub/GitLab release; *Check for updates*, *Download and install*. | Release notes shown; service restarts on 1.0.2; audit *update installed*. Replace the MSI asset with an unsigned/modified one: *Update rejected*. |
 | 15 | `rdpmon-svc import` a newer package; again with the same file; then an older one. | Exit 0 (applied); exit 0 (already applied); exit 4 (rejected). |
 
