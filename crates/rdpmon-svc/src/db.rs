@@ -473,6 +473,23 @@ impl Db {
         self.conn.execute("UPDATE outbox SET next_attempt_at=?1 WHERE status='pending'", [ts(Utc::now())])
     }
 
+    pub fn status_count(&self, status: &str) -> Result<u64> {
+        self.conn.query_row("SELECT count(*) FROM outbox WHERE status=?1", [status], |r| Ok(r.get::<_, i64>(0)? as u64))
+    }
+
+    pub fn pending_ids(&self) -> Result<Vec<i64>> {
+        let mut st = self.conn.prepare("SELECT id FROM outbox WHERE status='pending'")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    pub fn oldest_pending(&self) -> Result<Option<DateTime<Utc>>> {
+        Ok(self
+            .conn
+            .query_row("SELECT min(created_at) FROM outbox WHERE status='pending'", [], |r| r.get::<_, Option<String>>(0))?
+            .and_then(|s| parse_ts(&s)))
+    }
+
     pub fn outbox_counts(&self) -> Result<(u64, u64)> {
         self.conn.query_row(
             "SELECT coalesce(sum(status='pending'),0), coalesce(sum(status='failed'),0) FROM outbox",

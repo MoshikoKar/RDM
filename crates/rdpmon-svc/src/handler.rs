@@ -264,6 +264,9 @@ fn changed_sections(a: &Config, b: &Config) -> String {
     if a.report != b.report {
         v.push("weekly report");
     }
+    if a.heartbeat != b.heartbeat {
+        v.push("heartbeat");
+    }
     if a.retention != b.retention {
         v.push("retention");
     }

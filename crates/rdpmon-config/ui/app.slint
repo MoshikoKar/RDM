@@ -117,6 +117,9 @@ export component AppWindow inherits Window {
     in-out property <int> report-day: 0;
     in-out property <string> report-time: "08:00";
     in-out property <string> report-recipients;
+    in-out property <bool> hb-enabled: false;
+    in-out property <string> hb-time: "08:00";
+    in-out property <bool> hb-recovery: false;
 
     // security
     in-out property <string> trusted-key;
@@ -871,6 +874,26 @@ export component AppWindow inherits Window {
                                     placeholder-text: "Empty = same as notification recipients";
                                     enabled: root.report-enabled;
                                 }
+                            }
+                            Section {
+                                text: "Health";
+                            }
+                            CheckBox {
+                                text: "Send a daily heartbeat email (agent version, event channels, queue)";
+                                checked <=> root.hb-enabled;
+                            }
+                            Row {
+                                label: "Heartbeat time";
+                                LineEdit {
+                                    text <=> root.hb-time;
+                                    width: 90px;
+                                    enabled: root.hb-enabled;
+                                }
+                                Rectangle { }
+                            }
+                            CheckBox {
+                                text: "After an email outage, send one summary of delayed and dropped alerts";
+                                checked <=> root.hb-recovery;
                             }
                         }
 

@@ -163,6 +163,9 @@ fn fill_config(ui: &AppWindow, c: &Config, has_pw: bool, has_tok: bool) {
     ui.set_report_day(DAYS.iter().position(|d| r.day.eq_ignore_ascii_case(d) || r.day.to_lowercase().starts_with(&d[..3])).unwrap_or(0) as i32);
     ui.set_report_time(r.time.clone().into());
     ui.set_report_recipients(r.recipients.join(", ").into());
+    ui.set_hb_enabled(c.heartbeat.enabled);
+    ui.set_hb_time(c.heartbeat.time.clone().into());
+    ui.set_hb_recovery(c.heartbeat.recovery_summary);
     ui.set_trusted_key(c.security.trusted_config_key.clone().into());
     ui.set_harden(c.security.harden_service);
     let u = &c.updates;
@@ -232,6 +235,9 @@ fn read_config(ui: &AppWindow) -> Result<(Config, Option<String>, Option<String>
     c.report.day = DAYS[(ui.get_report_day().clamp(0, 6)) as usize].to_string();
     c.report.time = ui.get_report_time().trim().to_string();
     c.report.recipients = split_addresses(&ui.get_report_recipients());
+    c.heartbeat.enabled = ui.get_hb_enabled();
+    c.heartbeat.time = ui.get_hb_time().trim().to_string();
+    c.heartbeat.recovery_summary = ui.get_hb_recovery();
     c.security.trusted_config_key = ui.get_trusted_key().trim().to_string();
     c.security.harden_service = ui.get_harden();
     c.updates.provider = match ui.get_update_provider() {

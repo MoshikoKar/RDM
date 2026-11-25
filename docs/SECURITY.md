@@ -70,8 +70,9 @@ is in Windows administration, not in the agent:
    1102 (Security log cleared), 104 (other log cleared), 4719 (audit policy
    changed), 7045 (service installed), 7036/7040 (service stopped / start type
    changed), 4697 (service installed, if audited).
-3. **Use the weekly report as a heartbeat**: a computer whose report stops
-   arriving needs investigation.
+3. **Watch for silence**: enable the daily heartbeat (`[heartbeat]`) - a
+   computer whose heartbeat stops arriving, or arrives as WARNING, needs
+   investigation. Without it, the weekly report is the only sign of life.
 4. **Application control** (WDAC / AppLocker) to block tools such as PsExec on
    workstations.
 5. Protect the deployment share, the signing keys and the GPOs; whoever controls

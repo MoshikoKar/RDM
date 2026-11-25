@@ -60,6 +60,12 @@ time = "08:00"                   # local time, 24-hour
 period_days = 7
 recipients = []                  # empty = same as [smtp] to
 
+[heartbeat]
+enabled = false                  # daily "agent is alive" email with channel and queue status
+time = "08:00"                   # local time, 24-hour
+recipients = []                  # empty = same as [smtp] to
+recovery_summary = false         # after an email outage, one summary of delayed / dropped alerts
+
 [retention]
 history_days = 365
 audit_days = 365
