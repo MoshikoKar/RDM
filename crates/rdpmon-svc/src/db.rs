@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub type Result<T> = rusqlite::Result<T>;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 pub const KV_INITIALIZED: &str = "initialized";
 
 pub fn ts(t: DateTime<Utc>) -> String {
@@ -29,6 +29,8 @@ pub fn kind_name(k: Signal) -> &'static str {
         Signal::Disconnect => "disconnect",
         Signal::Auth => "auth",
         Signal::Failed => "failed",
+        Signal::ShareAccess => "share",
+        Signal::ShareDenied => "share_denied",
     }
 }
 
@@ -51,6 +53,17 @@ pub struct Message {
     pub subject: String,
     pub text: String,
     pub html: String,
+}
+
+/// Share access in a period, grouped by type, account, IP and share.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShareRow {
+    pub kind: String,
+    pub user: String,
+    pub domain: String,
+    pub ip: String,
+    pub share: String,
+    pub count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +136,15 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        if v < 2 {
+            self.conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE connections ADD COLUMN share TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE connections ADD COLUMN path TEXT NOT NULL DEFAULT '';
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+        }
         Ok(())
     }
 
@@ -166,9 +188,9 @@ impl Db {
         let tx = self.conn.transaction()?;
         let ids = c.event_ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
         tx.execute(
-            "INSERT INTO connections (kind, event_time, hostname, username, domain, source_ip, session_id, event_ids, recovered, notify_status)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![kind_name(c.kind), ts(c.time), hostname, c.user, c.domain, c.ip, c.session_id, ids, recovered, status],
+            "INSERT INTO connections (kind, event_time, hostname, username, domain, source_ip, session_id, event_ids, recovered, notify_status, share, path)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![kind_name(c.kind), ts(c.time), hostname, c.user, c.domain, c.ip, c.session_id, ids, recovered, status, c.share, c.path],
         )?;
         let conn_id = tx.last_insert_rowid();
         for r in &c.refs {
@@ -213,6 +235,26 @@ impl Db {
             params![ts(start), ts(end)],
             |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
         )
+    }
+
+    pub fn shares_between(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Vec<ShareRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT kind, username, domain, source_ip, share, count(*) FROM connections
+             WHERE event_time >= ?1 AND event_time < ?2 AND kind IN ('share','share_denied')
+             GROUP BY kind, lower(domain), lower(username), source_ip, lower(share)
+             ORDER BY count(*) DESC, username LIMIT 200",
+        )?;
+        let rows = st.query_map(params![ts(start), ts(end)], |r| {
+            Ok(ShareRow {
+                kind: r.get(0)?,
+                user: r.get(1)?,
+                domain: r.get(2)?,
+                ip: r.get(3)?,
+                share: r.get(4)?,
+                count: r.get::<_, i64>(5)? as u64,
+            })
+        })?;
+        rows.collect()
     }
 
     pub fn recent_history(&self, limit: u32) -> Result<Vec<HistoryEntry>> {
@@ -498,6 +540,42 @@ mod tests {
         let range = (t - Duration::hours(1), t + Duration::hours(1));
         assert_eq!(db.failed_between(range.0, range.1).unwrap(), (3, 2));
         assert!(db.connections_between(range.0, range.1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn share_history_and_schema_upgrade() {
+        let mut db = Db::memory();
+        let t = Utc::now();
+        for (i, (kind, share)) in [(Signal::ShareAccess, r"\\*\C$"), (Signal::ShareAccess, r"\\*\c$"), (Signal::ShareDenied, r"\\*\Finance")].iter().enumerate() {
+            let mut s = conn("jdoe", t);
+            s.kind = *kind;
+            s.share = share.to_string();
+            s.refs[0].record_id = 200 + i as u64;
+            db.record_connection(&s, "PC01", "k", false, "n/a", None, 10).unwrap();
+        }
+        let rows = db.shares_between(t - Duration::hours(1), t + Duration::hours(1)).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].kind.as_str(), rows[0].count), ("share", 2));
+        // A version 1 database gains the new columns.
+        let dir = std::env::temp_dir().join(format!("rdpmon-test-{}", rdpmon_core::crypto::random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        {
+            // Turn a current database back into the version 1 layout.
+            let old = Db::open(&path).unwrap();
+            old.conn
+                .execute_batch(
+                    "DROP INDEX IF EXISTS ix_connections_user_ip;
+                     ALTER TABLE connections DROP COLUMN share;
+                     ALTER TABLE connections DROP COLUMN path;
+                     PRAGMA user_version = 1;",
+                )
+                .unwrap();
+        }
+        let mut db = Db::open(&path).unwrap();
+        db.record_connection(&conn("jdoe", t), "PC01", "k", false, "n/a", None, 10).unwrap();
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

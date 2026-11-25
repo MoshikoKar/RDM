@@ -45,6 +45,9 @@ pub struct Connection {
     pub session_id: Option<u32>,
     pub event_ids: Vec<u32>,
     pub refs: Vec<EventRef>,
+    /// Share access only: share as logged and the path inside it (5145).
+    pub share: String,
+    pub path: String,
 }
 
 impl Connection {
@@ -250,7 +253,7 @@ impl Correlator {
         event_ids.sort_unstable();
         event_ids.dedup();
         let refs = obs.iter().map(|o| EventRef { channel: o.channel.clone(), record_id: o.record_id, time: o.time }).collect();
-        Connection { kind, time: primary.time, user: primary.user, domain, ip, other_ips, session_id, event_ids, refs }
+        Connection { kind, time: primary.time, user: primary.user, domain, ip, other_ips, session_id, event_ids, refs, ..Default::default() }
     }
 }
 

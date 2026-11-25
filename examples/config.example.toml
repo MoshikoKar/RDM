@@ -41,6 +41,13 @@ enabled = false                  # email when one source IP fails to log on repe
 threshold = 5                    # failures from one IP within the window that trigger an email
 window_minutes = 5
 
+[smb]                            # access to this computer's shared folders (C$, ADMIN$, regular shares)
+enabled = false                  # needs auditing: "File Share" success, "Detailed File Share" failure, "Logon" failure
+notify_success = true            # email on successful share access (5140, once per session per share)
+notify_failed = true             # email on denied access (5145 failure) and on failed network logons (4625, [failed_logons] threshold)
+exclude_shares = []              # e.g. ["IPC$", "print$"]: never emailed, still recorded in history
+admin_shares_only = false        # true = email only for shares ending in $
+
 [report]
 enabled = true
 day = "monday"

@@ -19,7 +19,21 @@ pub enum Signal {
     Disconnect,
     /// 4625 LogonType 3 or 10: failed logon. Never correlated into a session.
     Failed,
+    /// 5140 (success): a shared folder was opened.
+    ShareAccess,
+    /// 5145 / 5140 with the Audit Failure keyword: share access denied.
+    ShareDenied,
 }
+
+impl Signal {
+    /// Events handled outside the RDP session correlation.
+    pub fn is_standalone(self) -> bool {
+        matches!(self, Signal::Failed | Signal::ShareAccess | Signal::ShareDenied)
+    }
+}
+
+/// Audit Failure bit of the event Keywords.
+const KEYWORD_AUDIT_FAILURE: u64 = 0x0010_0000_0000_0000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Observation {
@@ -38,6 +52,10 @@ pub struct Observation {
     pub logon_type: String,
     /// 4625 only: SubStatus, or Status when SubStatus is 0x0 (lower case).
     pub status: String,
+    /// 5140 / 5145: share as logged (e.g. `\\*\C$`).
+    pub share: String,
+    /// 5145: file or folder inside the share.
+    pub path: String,
 }
 
 /// Canonical form of an account domain so the forms used by different events
@@ -98,7 +116,22 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
 
     let mut logon_id = None;
     let (mut logon_type, mut status) = (String::new(), String::new());
+    let (mut share, mut path) = (String::new(), String::new());
     let (signal, user, domain, ip, session_id) = match (channel.as_str(), event_id) {
+        (CH_SECURITY, 5140 | 5145) => {
+            let kw = text(child(system, "Keywords"));
+            let kw = u64::from_str_radix(kw.trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0);
+            let failure = kw & KEYWORD_AUDIT_FAILURE != 0;
+            if event_id == 5145 && !failure {
+                return Err(Skip::Irrelevant); // per-file success auditing: far too noisy
+            }
+            share = one_line(&data("ShareName"), 260);
+            if event_id == 5145 {
+                path = one_line(&data("RelativeTargetName"), 260);
+            }
+            let sig = if failure { Signal::ShareDenied } else { Signal::ShareAccess };
+            (sig, data("SubjectUserName"), data("SubjectDomainName"), data("IpAddress"), None)
+        }
         (CH_SECURITY, 4625) => {
             logon_type = data("LogonType");
             if logon_type != "3" && logon_type != "10" {
@@ -141,7 +174,7 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
         return Err(Skip::Irrelevant);
     }
     let (user, domain) = (one_line(&user, 256), one_line(&domain, 256));
-    Ok(Observation { channel, record_id, event_id, time, signal, user, domain, ip, session_id, logon_id, logon_type, status })
+    Ok(Observation { channel, record_id, event_id, time, signal, user, domain, ip, session_id, logon_id, logon_type, status, share, path })
 }
 
 fn one_line(s: &str, max: usize) -> String {
@@ -227,6 +260,22 @@ pub mod samples {
         ])
     }
 
+    /// 5140 / 5145 with the success or failure audit keyword.
+    pub fn share_event(id: u32, rec: u64, time: &str, user: &str, ip: &str, share: &str, path: &str, failure: bool) -> String {
+        let kw = if failure { "0x8010000000000000" } else { "0x8020000000000000" };
+        format!(
+            "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System>\
+             <Provider Name='Microsoft-Windows-Security-Auditing'/><EventID>{id}</EventID><Keywords>{kw}</Keywords>\
+             <TimeCreated SystemTime='{time}'/><EventRecordID>{rec}</EventRecordID>\
+             <Channel>Security</Channel><Computer>PC01.corp.local</Computer></System><EventData>\
+             <Data Name='SubjectUserSid'>S-1-5-21-1</Data><Data Name='SubjectUserName'>{user}</Data>\
+             <Data Name='SubjectDomainName'>CORP</Data><Data Name='SubjectLogonId'>0x5a1b2</Data>\
+             <Data Name='ObjectType'>File</Data><Data Name='IpAddress'>{ip}</Data><Data Name='IpPort'>50112</Data>\
+             <Data Name='ShareName'>{share}</Data><Data Name='ShareLocalPath'>\\??\\C:\\</Data>\
+             <Data Name='RelativeTargetName'>{path}</Data><Data Name='AccessMask'>0x1</Data></EventData></Event>"
+        )
+    }
+
     pub fn session4778(id: u32, rec: u64, time: &str, user: &str, ip: &str) -> String {
         security(id, rec, time, &[
             ("AccountName", user), ("AccountDomain", "CORP"), ("LogonID", "0x3e7a1"),
@@ -293,6 +342,18 @@ mod tests {
         assert_eq!(parse(&failed4625(9, T, "jdoe", "::1", "3", "0xc000006a"), true), Err(Skip::Irrelevant));
         assert!(parse(&failed4625(9, T, "jdoe", "::1", "3", "0xc000006a"), false).is_ok());
         assert!(parse(&failed4625(10, T, "", "198.51.100.7", "3", "0xc0000064"), true).is_ok(), "empty user name still counts");
+    }
+
+    #[test]
+    fn parses_share_events() {
+        let a = parse(&share_event(5140, 11, T, "jdoe", "10.10.1.222", r"\\*\C$", "", false), true).unwrap();
+        assert_eq!((a.signal, a.share.as_str(), a.ip.as_str(), a.user.as_str()), (Signal::ShareAccess, r"\\*\C$", "10.10.1.222", "jdoe"));
+        let d = parse(&share_event(5145, 12, T, "jdoe", "10.10.1.222", r"\\*\Finance", r"2026\budget.xlsx", true), true).unwrap();
+        assert_eq!((d.signal, d.path.as_str()), (Signal::ShareDenied, r"2026\budget.xlsx"));
+        assert_eq!(parse(&share_event(5145, 13, T, "jdoe", "10.10.1.222", r"\\*\Finance", "x", false), true), Err(Skip::Irrelevant), "5145 success is never used");
+        assert_eq!(parse(&share_event(5140, 14, T, "jdoe", "10.10.1.222", r"\\*\C$", "", true), true).unwrap().signal, Signal::ShareDenied);
+        assert!(parse(&share_event(5140, 15, T, "PC02$", "10.10.1.5", r"\\*\IPC$", "", false), true).is_ok(), "machine-like names still count");
+        assert_eq!(parse(&share_event(5140, 16, T, "jdoe", "::1", r"\\*\C$", "", false), true), Err(Skip::Irrelevant));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! through Windows Event Log subscriptions and sends email notifications.
 
 mod app;
+mod auditpol;
 mod auth;
 mod cli;
 mod correlate;

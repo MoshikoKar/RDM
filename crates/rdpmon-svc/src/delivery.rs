@@ -153,7 +153,10 @@ fn run_weekly_report(shared: &Shared, db: &mut Db, cfg: &Config) {
             let start = end - Duration::days(cfg.report.period_days as i64);
             match db.connections_between(start, end) {
                 Ok(rows) => {
-                    let extra = notify::ReportExtra { failed: db.failed_between(start, end).unwrap_or_default() };
+                    let extra = notify::ReportExtra {
+                        failed: db.failed_between(start, end).unwrap_or_default(),
+                        shares: db.shares_between(start, end).unwrap_or_default(),
+                    };
                     let m = notify::report_message(&rows, &extra, &shared.host, start, end);
                     match db.enqueue("report", &format!("report:{slot_s}"), &m, cfg.notifications.max_queue) {
                         Ok(_) => logging::info(&format!("weekly report queued ({} connections)", rows.len())),

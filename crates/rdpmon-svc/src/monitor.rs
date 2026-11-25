@@ -50,11 +50,24 @@ fn channel_queries_aged(c: &Config, age_ms: u64) -> Vec<(&'static str, Vec<Strin
         security.push(format!("*[System[(EventID=4624) and {age}]] and *[EventData[Data[@Name='LogonType']='10']]"));
         security.push(format!("*[System[(EventID=4778 or EventID=4779) and {age}]]"));
     }
-    if c.failed_logons.enabled {
+    if c.failed_logons_active() {
         // With NLA a failed RDP password is LogonType 3, not 10.
         security.push(format!(
             "*[System[(EventID=4625) and {age}]] and *[EventData[Data[@Name='LogonType']='3' or Data[@Name='LogonType']='10']]"
         ));
+    }
+    if c.smb.enabled {
+        // Audit Failure keyword (0x10000000000000): the event log service
+        // drops 5145 successes (one per file opened) before they reach us.
+        let failure = "band(Keywords,4503599627370496)";
+        if c.smb.notify_success {
+            security.push(format!("*[System[(EventID=5140) and {age}]]"));
+        } else {
+            security.push(format!("*[System[(EventID=5140) and {failure} and {age}]]"));
+        }
+        if c.smb.notify_failed {
+            security.push(format!("*[System[(EventID=5145) and {failure} and {age}]]"));
+        }
     }
     if !security.is_empty() {
         v.push((CH_SECURITY, security));
@@ -219,6 +232,14 @@ fn open_channel(ch: &mut Channel, db: &Db) {
                 let _ = db.set_kv(&since_key, &crate::db::ts(chrono::Utc::now()));
                 "started (new events only)".into()
             };
+            if ch.name == CH_SECURITY {
+                let w = crate::auditpol::warnings(&ch.cfg);
+                if !w.is_empty() {
+                    let w = w.join("; ");
+                    logging::warn(&format!("audit policy: {w}"));
+                    ch.status.detail.push_str(&format!("; WARNING: {w}"));
+                }
+            }
             ch.signal.set(); // drain immediately
             logging::info(&format!("subscribed to {} ({})", ch.name, ch.status.detail));
         }
@@ -261,6 +282,8 @@ fn drain_channel(shared: &Shared, db: &mut Db, corr: &mut Correlator, failed: &m
                             }
                             if o.signal == Signal::Failed {
                                 handle_failed(shared, db, failed, o);
+                            } else if o.signal.is_standalone() {
+                                handle_share(shared, db, o);
                             } else {
                                 corr.push(o, Instant::now());
                             }
@@ -335,6 +358,38 @@ fn handle_failed(shared: &Shared, db: &mut Db, tracker: &mut FailedTracker, o: O
     record(shared, db, &cfg, &c, &key, recovered, status, msg);
 }
 
+/// One share access / denied event: no correlation, one row per event,
+/// emailed per account + IP + share outside the cooldown.
+fn handle_share(shared: &Shared, db: &mut Db, o: Observation) {
+    let cfg = shared.cfg();
+    let recovered = o.time < shared.started - chrono::Duration::seconds(5);
+    let c = Connection {
+        kind: o.signal,
+        time: o.time,
+        refs: vec![EventRef { channel: o.channel, record_id: o.record_id, time: o.time }],
+        event_ids: vec![o.event_id],
+        user: o.user,
+        domain: o.domain,
+        ip: o.ip,
+        share: o.share,
+        path: o.path,
+        ..Default::default()
+    };
+    let key = format!(
+        "smb|{}|{}|{}|{}",
+        events::normalize_domain(&c.domain, &shared.host),
+        c.user.to_lowercase(),
+        c.ip,
+        notify::share_name(&c.share).to_lowercase()
+    );
+    let status = notify::decide_share(&c, &cfg, db.cooldown_last(&key).ok().flatten());
+    let msg = (status == notify::ST_QUEUED).then(|| {
+        let source_host = crate::resolve::hostname(&c.ip, crate::resolve::TIMEOUT);
+        notify::share_message(&c, &shared.host, source_host.as_deref(), &cfg, recovered)
+    });
+    record(shared, db, &cfg, &c, &key, recovered, status, msg);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record(shared: &Shared, db: &mut Db, cfg: &Config, c: &Connection, key: &str, recovered: bool, status: &str, msg: Option<crate::db::Message>) {
     match db.record_connection(c, &shared.host, key, recovered, status, msg, cfg.notifications.max_queue) {
@@ -379,7 +434,11 @@ mod tests {
     fn production_queries_are_accepted_by_windows() {
         let mut all = Config::default();
         all.failed_logons.enabled = true;
-        for (_, selects) in channel_queries(&all) {
+        all.smb.enabled = true;
+        let mut failed_only = all.clone();
+        failed_only.smb.notify_success = false;
+        let selects: Vec<_> = channel_queries(&all).into_iter().chain(channel_queries(&failed_only)).collect();
+        for (_, selects) in selects {
             let sig = Event::new(true).unwrap();
             Subscription::open(&query_xml("Application", &selects), None, sig.0).expect("query rejected");
         }

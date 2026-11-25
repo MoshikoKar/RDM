@@ -93,6 +93,27 @@ per quiet period (never more often than the window). The weekly report shows the
 total. Needs *Audit Logon* failure auditing, which Windows enables by default:
 `auditpol /set /subcategory:"Logon" /failure:enable`
 
+**Shared folders (SMB)** (`[smb]`): reports access to this computer's shares,
+admin shares (`C$`, `ADMIN$`) and regular ones alike, from other machines.
+
+| Case | Event | Email |
+|---|---|---|
+| Share opened | 5140 (once per session per share) | "Share access" with user, IP, hostname, share |
+| Valid account, no permission | 5145 *failure only* (filtered in the event log service) | "Share access denied" with the path |
+| Wrong password | 4625 LogonType 3 | "Failed logon", same threshold as above |
+
+One email per account + IP + share per quiet period. `exclude_shares` (e.g.
+`IPC$`, `print$`) and `admin_shares_only` only suppress the email; every event is
+still recorded in history, and the weekly report lists share access per user, IP
+and share. Account names are not filtered (an account named `x$` still alerts).
+Prerequisites - the status page shows a warning when one is missing:
+
+```
+auditpol /set /subcategory:"File Share" /success:enable
+auditpol /set /subcategory:"Detailed File Share" /failure:enable   # never /success: one event per file
+auditpol /set /subcategory:"Logon" /failure:enable
+```
+
 ## Troubleshoot
 
 ```powershell

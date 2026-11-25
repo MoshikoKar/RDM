@@ -150,6 +150,11 @@ fn fill_config(ui: &AppWindow, c: &Config, has_pw: bool, has_tok: bool) {
     ui.set_failed_enabled(c.failed_logons.enabled);
     ui.set_failed_threshold(c.failed_logons.threshold.to_string().into());
     ui.set_failed_window(c.failed_logons.window_minutes.to_string().into());
+    ui.set_smb_enabled(c.smb.enabled);
+    ui.set_smb_success(c.smb.notify_success);
+    ui.set_smb_failed(c.smb.notify_failed);
+    ui.set_smb_admin_only(c.smb.admin_shares_only);
+    ui.set_smb_exclude(c.smb.exclude_shares.join(", ").into());
     ui.set_history_days(c.retention.history_days.to_string().into());
     let r = &c.report;
     ui.set_report_enabled(r.enabled);
@@ -213,6 +218,11 @@ fn read_config(ui: &AppWindow) -> Result<(Config, Option<String>, Option<String>
     c.failed_logons.enabled = ui.get_failed_enabled();
     c.failed_logons.threshold = parse_num(&ui.get_failed_threshold(), "Failed logon threshold")?;
     c.failed_logons.window_minutes = parse_num(&ui.get_failed_window(), "Failed logon window")?;
+    c.smb.enabled = ui.get_smb_enabled();
+    c.smb.notify_success = ui.get_smb_success();
+    c.smb.notify_failed = ui.get_smb_failed();
+    c.smb.admin_shares_only = ui.get_smb_admin_only();
+    c.smb.exclude_shares = ui.get_smb_exclude().split([',', ';', '\n']).map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
     c.retention.history_days = parse_num(&ui.get_history_days(), "History retention")?;
     c.report.enabled = ui.get_report_enabled();
     c.report.day = DAYS[(ui.get_report_day().clamp(0, 6)) as usize].to_string();
