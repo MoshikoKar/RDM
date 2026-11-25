@@ -27,6 +27,9 @@ notify_reconnects = true
 cooldown_minutes = 15            # per account (domain\user) + source IP; 0 = email every distinct connection
 max_queue = 500                  # undelivered emails kept; the oldest is dropped beyond this
 retry_hours = 72                 # stop retrying an email after this long
+internal_networks = []           # extra ranges shown as "Internal", e.g. ["10.200.0.0/16"] (private ranges always are)
+business_hours = ""              # e.g. "08:00-19:00" local time; empty = no off-hours row in alerts
+business_days = ["sunday", "monday", "tuesday", "wednesday", "thursday"]
 
 [monitoring]
 security_log = true              # 4624 (LogonType 10), 4778, 4779

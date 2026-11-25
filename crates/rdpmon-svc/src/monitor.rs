@@ -321,8 +321,12 @@ fn handle_connection(shared: &Shared, db: &mut Db, cfg: &Config, c: &Connection)
     let last = db.cooldown_last(&c.key(&shared.host)).ok().flatten();
     let status = notify::decide(c, cfg, last);
     let msg = (status == notify::ST_QUEUED).then(|| {
-        let source_host = crate::resolve::hostname(&c.ip, crate::resolve::TIMEOUT);
-        notify::alert_message(c, &shared.host, source_host.as_deref(), cfg, recovered)
+        let ctx = notify::AlertContext {
+            source_host: crate::resolve::hostname(&c.ip, crate::resolve::TIMEOUT),
+            // Before this connection is recorded.
+            first_seen: db.first_seen(&c.user, &c.ip).ok().map(|f| notify::first_seen_text(&f)),
+        };
+        notify::alert_message(c, &shared.host, &ctx, cfg, recovered)
     });
     record(shared, db, cfg, c, &c.key(&shared.host), recovered, status, msg);
 }

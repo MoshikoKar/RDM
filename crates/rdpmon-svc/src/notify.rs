@@ -3,7 +3,7 @@
 use crate::correlate::Connection;
 use crate::db::{ConnRow, Message, ShareRow};
 use crate::events::Signal;
-use chrono::{DateTime, Datelike, Duration, Local, LocalResult, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, LocalResult, NaiveDate, TimeZone, Timelike, Utc};
 use rdpmon_core::config::{Config, ReportConfig};
 use std::collections::BTreeMap;
 
@@ -100,6 +100,54 @@ pub fn decide_share(c: &Connection, cfg: &Config, last_notified: Option<DateTime
     ST_QUEUED
 }
 
+/// "Internal", "External", "Loopback" or "Unknown" (not an address).
+pub fn network_class(ip: &str, internal_networks: &[String]) -> &'static str {
+    use std::net::IpAddr::{V4, V6};
+    let Ok(a) = ip.trim().parse::<std::net::IpAddr>() else { return "Unknown" };
+    let a = match a {
+        V6(v6) => v6.to_ipv4_mapped().map(V4).unwrap_or(V6(v6)),
+        v4 => v4,
+    };
+    if a.is_loopback() {
+        return "Loopback";
+    }
+    let configured = internal_networks.iter().filter_map(|c| rdpmon_core::config::parse_cidr(c)).any(|n| rdpmon_core::config::cidr_contains(n, a));
+    let builtin = match a {
+        // RFC 1918, link-local, CGNAT 100.64.0.0/10
+        V4(v) => v.is_private() || v.is_link_local() || (v.octets()[0] == 100 && v.octets()[1] & 0xc0 == 64),
+        // ULA fc00::/7, link-local fe80::/10
+        V6(v) => v.segments()[0] & 0xfe00 == 0xfc00 || v.segments()[0] & 0xffc0 == 0xfe80,
+    };
+    if configured || builtin { "Internal" } else { "External" }
+}
+
+/// None when business hours are not configured.
+pub fn outside_business_hours(cfg: &Config, t: DateTime<Utc>) -> Option<bool> {
+    let n = &cfg.notifications;
+    let ((sh, sm), (eh, em)) = rdpmon_core::config::parse_hours_range(&n.business_hours)?;
+    let l = t.with_timezone(&Local);
+    let business_day = n.business_days.iter().filter_map(|d| rdpmon_core::config::parse_weekday(d)).any(|d| d == l.weekday());
+    let m = l.hour() * 60 + l.minute();
+    Some(!(business_day && m >= sh * 60 + sm && m < eh * 60 + em))
+}
+
+pub fn first_seen_text(f: &crate::db::FirstSeen) -> String {
+    use crate::db::FirstSeen::*;
+    match f {
+        NewUser => "First connection by this user".into(),
+        NewIp => "First connection from this IP".into(),
+        NewPair => "First time this user connects from this IP".into(),
+        Seen(t) => format!("Seen before (last: {})", local(*t)),
+    }
+}
+
+/// Facts about an RDP connection that need a lookup (network, database).
+#[derive(Debug, Default)]
+pub struct AlertContext {
+    pub source_host: Option<String>,
+    pub first_seen: Option<String>,
+}
+
 pub fn local(t: DateTime<Utc>) -> String {
     t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S (UTC%:z)").to_string()
 }
@@ -141,7 +189,7 @@ th,td{border:1px solid #d0d7de;padding:5px 9px;text-align:left;vertical-align:to
 th{background:#f3f4f6;font-weight:600}.muted{color:#656d76;font-size:12px}";
 
 /// `source_host` is the reverse-resolved name of the source IP, if any.
-pub fn alert_message(c: &Connection, host: &str, source_host: Option<&str>, cfg: &Config, recovered: bool) -> Message {
+pub fn alert_message(c: &Connection, host: &str, ctx: &AlertContext, cfg: &Config, recovered: bool) -> Message {
     let user_full = if c.domain.is_empty() { c.user.clone() } else { format!("{}\\{}", c.domain, c.user) };
     let when = local(c.time);
     let kind = type_label(c.kind);
@@ -171,7 +219,7 @@ pub fn alert_message(c: &Connection, host: &str, source_host: Option<&str>, cfg:
         ("Computer", host.to_string()),
         ("User", user_full),
         ("Source IP", c.ip.clone()),
-        ("Source hostname", source_host.unwrap_or("could not be resolved").to_string()),
+        ("Source hostname", ctx.source_host.clone().unwrap_or_else(|| "could not be resolved".into())),
         (
             "Client workstation (reported)",
             if c.client_name.is_empty() { "not reported".to_string() } else { one_line(&c.client_name, 64) },
@@ -180,8 +228,15 @@ pub fn alert_message(c: &Connection, host: &str, source_host: Option<&str>, cfg:
     if !c.other_ips.is_empty() {
         rows.push(("Other addresses seen", c.other_ips.join(", ")));
     }
+    rows.push(("Connection type", kind.to_string()));
+    rows.push(("Source network", network_class(&c.ip, &cfg.notifications.internal_networks).to_string()));
+    if let Some(f) = &ctx.first_seen {
+        rows.push(("First seen", f.clone()));
+    }
+    if let Some(off) = outside_business_hours(cfg, c.time) {
+        rows.push(("Outside business hours", if off { "Yes (outside business hours)" } else { "No" }.to_string()));
+    }
     rows.extend([
-        ("Connection type", kind.to_string()),
         ("Date and time", when),
         ("Session ID", session),
         ("Windows event IDs", ids),
@@ -522,25 +577,25 @@ mod tests {
         c.notifications.subject_format = "{type}: {user} from {ip} on {host}".into();
         let mut x = conn(Signal::Reconnect, Utc::now());
         x.user = "<script>\r\nBcc: evil".into();
-        let m = alert_message(&x, "PC01", Some("ITMOSHE.corp.example"), &c, true);
+        let m = alert_message(&x, "PC01", &AlertContext { source_host: Some("ITMOSHE.corp.example".into()), ..Default::default() }, &c, true);
         assert!(!m.subject.contains('\n') && !m.subject.contains('\r'));
         assert!(m.subject.starts_with("Reconnection: "));
         assert!(m.html.contains("&lt;script&gt;") && !m.html.contains("<script>"));
         assert!(m.text.contains("Source IP:") && m.text.contains("recovered"));
         assert!(m.text.contains("Source hostname:   ITMOSHE.corp.example"));
-        let unresolved = alert_message(&x, "PC01", None, &c, false);
+        let unresolved = alert_message(&x, "PC01", &AlertContext::default(), &c, false);
         assert!(unresolved.html.contains("<th>Source hostname</th><td>could not be resolved</td>"));
         assert!(!unresolved.text.contains("Other addresses seen"));
         assert!(unresolved.text.contains("Client workstation (reported): not reported"));
         x.client_name = "<b>x</b>".into();
-        let named = alert_message(&x, "PC01", None, &c, false);
+        let named = alert_message(&x, "PC01", &AlertContext::default(), &c, false);
         assert!(named.html.contains("<th>Client workstation (reported)</th><td>&lt;b&gt;x&lt;/b&gt;</td>"));
         assert!(named.text.contains("Client workstation (reported): <b>x</b>"));
         let order = |m: &str| ["Source IP", "Source hostname", "Client workstation (reported)"].map(|k| m.find(k).unwrap());
         let o = order(&named.text);
         assert!(o[0] < o[1] && o[1] < o[2], "row order");
         x.other_ips = vec!["10.0.0.1".into()];
-        assert!(alert_message(&x, "PC01", None, &c, false).html.contains("<th>Other addresses seen</th><td>10.0.0.1</td>"));
+        assert!(alert_message(&x, "PC01", &AlertContext::default(), &c, false).html.contains("<th>Other addresses seen</th><td>10.0.0.1</td>"));
     }
 
     #[test]
@@ -603,6 +658,61 @@ mod tests {
         assert!(m.text.contains("Share access denied") && m.text.contains("itmoshe.corp.local"));
         assert!(!share_message(&x, "PC01", None, &c, false).text.contains("Path:"));
         assert_eq!(share_name(r"\\*\ADMIN$"), "ADMIN$");
+    }
+
+    #[test]
+    fn network_classification() {
+        let none: Vec<String> = Vec::new();
+        assert_eq!(network_class("10.10.1.111", &none), "Internal");
+        assert_eq!(network_class("172.16.5.1", &none), "Internal");
+        assert_eq!(network_class("192.168.1.1", &none), "Internal");
+        assert_eq!(network_class("100.64.0.1", &none), "Internal");
+        assert_eq!(network_class("169.254.1.1", &none), "Internal");
+        assert_eq!(network_class("fd12:3456::1", &none), "Internal");
+        assert_eq!(network_class("fe80::1", &none), "Internal");
+        assert_eq!(network_class("8.8.8.8", &none), "External");
+        assert_eq!(network_class("100.128.0.1", &none), "External");
+        assert_eq!(network_class("2001:4860::8888", &none), "External");
+        assert_eq!(network_class("::ffff:10.0.0.1", &none), "Internal");
+        assert_eq!(network_class("127.0.0.1", &none), "Loopback");
+        assert_eq!(network_class("::1", &none), "Loopback");
+        assert_eq!(network_class("weird-addr", &none), "Unknown");
+        assert_eq!(network_class("203.0.113.10", &["203.0.113.0/24".to_string()]), "Internal");
+    }
+
+    #[test]
+    fn business_hours_boundaries() {
+        let mut c = cfg();
+        let at = |d: u32, h: u32, m: u32| Local.with_ymd_and_hms(2026, 11, d, h, m, 0).unwrap().with_timezone(&Utc);
+        assert_eq!(outside_business_hours(&c, at(25, 3, 0)), None, "not configured");
+        c.notifications.business_hours = "08:00-19:00".into();
+        // Wednesday 2026-11-25 (default days: Sunday-Thursday)
+        assert_eq!(outside_business_hours(&c, at(25, 7, 59)), Some(true));
+        assert_eq!(outside_business_hours(&c, at(25, 8, 0)), Some(false));
+        assert_eq!(outside_business_hours(&c, at(25, 18, 59)), Some(false));
+        assert_eq!(outside_business_hours(&c, at(25, 19, 0)), Some(true));
+        // Friday 2026-11-27 and Sunday 2026-11-22
+        assert_eq!(outside_business_hours(&c, at(27, 10, 0)), Some(true));
+        assert_eq!(outside_business_hours(&c, at(22, 10, 0)), Some(false));
+    }
+
+    #[test]
+    fn context_rows_in_alert() {
+        let mut c = cfg();
+        let mut x = conn(Signal::NewLogon, Local.with_ymd_and_hms(2026, 11, 27, 23, 0, 0).unwrap().with_timezone(&Utc));
+        x.ip = "8.8.8.8".into();
+        let ctx = AlertContext { first_seen: Some("First connection from <this> IP".into()), ..Default::default() };
+        let plain = alert_message(&x, "PC01", &AlertContext::default(), &c, false);
+        assert!(plain.text.contains("Source network:    External"));
+        assert!(!plain.text.contains("First seen") && !plain.text.contains("business hours"));
+        c.notifications.business_hours = "08:00-19:00".into();
+        let m = alert_message(&x, "PC01", &ctx, &c, false);
+        assert!(m.html.contains("<th>First seen</th><td>First connection from &lt;this&gt; IP</td>"));
+        assert!(m.text.contains("Outside business hours: Yes (outside business hours)"));
+        let order = ["Connection type", "Source network", "First seen", "Outside business hours", "Date and time"].map(|k| m.text.find(k).unwrap());
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "rows follow Connection type");
+        assert_eq!(decide(&x, &c, None), ST_QUEUED, "decision unchanged");
+        assert_eq!(first_seen_text(&crate::db::FirstSeen::NewUser), "First connection by this user");
     }
 
     #[test]

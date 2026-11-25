@@ -68,7 +68,13 @@ they are still merged unless their session or logon IDs differ; the 4624 address
 is then the Source IP and the others are listed as "Other addresses seen". The
 alert also shows the name the client reports for itself (4624 WorkstationName /
 4778 ClientName) as "Client workstation (reported)"; any client can send any
-name, so it is shown for information only and never used for filtering. Only
+name, so it is shown for information only and never used for filtering.
+Context rows help judge a connection at a glance (they never change whether or
+how it is reported): *Source network* (Internal for private, CGNAT, link-local
+and ULA ranges plus `internal_networks`, otherwise External), *First seen*
+(first connection by this user / from this IP / of this pair, or the last time
+seen - limited by `history_days`), and *Outside business hours* when
+`business_hours` is set. Only
 RDP-specific events are selected (non-RDP logons such as network or service
 logons never reach the agent); built-in identities (`NT AUTHORITY`,
 `Window Manager`, `Font Driver Host`) and console (`LOCAL`) sessions are ignored.

@@ -77,6 +77,12 @@ pub struct NotificationConfig {
     pub max_queue: u32,
     /// Give up retrying a notification after this many hours.
     pub retry_hours: u32,
+    /// Extra address ranges (CIDR, e.g. a VPN pool) shown as "Internal" in
+    /// alerts. Private, CGNAT, link-local and ULA ranges always are.
+    pub internal_networks: Vec<String>,
+    /// "HH:MM-HH:MM" local time. Empty = no off-hours row in alerts.
+    pub business_hours: String,
+    pub business_days: Vec<String>,
 }
 
 impl Default for NotificationConfig {
@@ -88,6 +94,9 @@ impl Default for NotificationConfig {
             cooldown_minutes: 15,
             max_queue: 500,
             retry_hours: 72,
+            internal_networks: Vec::new(),
+            business_hours: String::new(),
+            business_days: ["sunday", "monday", "tuesday", "wednesday", "thursday"].map(String::from).to_vec(),
         }
     }
 }
@@ -332,6 +341,19 @@ impl Config {
         if !(1..=720).contains(&n.retry_hours) {
             errs.push("Retry period must be between 1 and 720 hours.".into());
         }
+        for c in &n.internal_networks {
+            if parse_cidr(c).is_none() {
+                errs.push(format!("Internal network '{c}' must be an address range such as 10.20.0.0/16."));
+            }
+        }
+        if !n.business_hours.trim().is_empty() && parse_hours_range(&n.business_hours).is_none() {
+            errs.push(format!("Business hours '{}' must look like 08:00-19:00 (start before end).", n.business_hours));
+        }
+        for d in &n.business_days {
+            if parse_weekday(d).is_none() {
+                errs.push(format!("Business day '{d}' is not a weekday name."));
+            }
+        }
         let m = &self.monitoring;
         if !m.security_log && !m.session_manager_log {
             errs.push("Enable at least one of the Security log or the Session Manager log.".into());
@@ -446,6 +468,39 @@ pub fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
     }
     let (h, m) = (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?);
     (h < 24 && m < 60).then_some((h, m))
+}
+
+/// "08:00-19:00" -> ((8, 0), (19, 0)); the start must be before the end.
+pub fn parse_hours_range(s: &str) -> Option<((u32, u32), (u32, u32))> {
+    let (a, b) = s.trim().split_once('-')?;
+    let (a, b) = (parse_hhmm(a)?, parse_hhmm(b)?);
+    (a < b).then_some((a, b))
+}
+
+/// "10.0.0.0/8", "fd00::/8" or a single address -> (network, prefix length).
+pub fn parse_cidr(s: &str) -> Option<(std::net::IpAddr, u8)> {
+    let s = s.trim();
+    let (a, p) = s.split_once('/').unwrap_or((s, ""));
+    let ip: std::net::IpAddr = a.trim().parse().ok()?;
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    let p: u8 = if p.is_empty() { max } else { p.trim().parse().ok()? };
+    (p <= max).then_some((ip, p))
+}
+
+pub fn cidr_contains(net: (std::net::IpAddr, u8), ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr::{V4, V6};
+    let p = net.1 as u32;
+    match (net.0, ip) {
+        (V4(n), V4(a)) => {
+            let m = if p == 0 { 0 } else { u32::MAX << (32 - p) };
+            u32::from(n) & m == u32::from(a) & m
+        }
+        (V6(n), V6(a)) => {
+            let m = if p == 0 { 0 } else { u128::MAX << (128 - p) };
+            u128::from(n) & m == u128::from(a) & m
+        }
+        _ => false,
+    }
 }
 
 /// Splits `https://host[:port]/a/b/c` into (host[:port], "a/b/c").
@@ -573,6 +628,26 @@ mod tests {
         );
         assert_eq!(repo_host_and_path("https://github.com/only-owner"), None);
         assert_eq!(split_addresses("a@x.com; b@y.com,\nc@z.com"), vec!["a@x.com", "b@y.com", "c@z.com"]);
+    }
+
+    #[test]
+    fn ranges_and_hours() {
+        let net = parse_cidr("10.20.0.0/16").unwrap();
+        assert!(cidr_contains(net, "10.20.3.4".parse().unwrap()));
+        assert!(!cidr_contains(net, "10.21.0.1".parse().unwrap()));
+        assert!(cidr_contains(parse_cidr("fd00::/8").unwrap(), "fd12::1".parse().unwrap()));
+        assert!(cidr_contains(parse_cidr("0.0.0.0/0").unwrap(), "8.8.8.8".parse().unwrap()));
+        assert!(!cidr_contains(net, "::1".parse().unwrap()));
+        assert_eq!(parse_cidr("1.2.3.4"), Some(("1.2.3.4".parse().unwrap(), 32)));
+        assert_eq!(parse_cidr("1.2.3.4/33"), None);
+        assert_eq!(parse_cidr("vpn"), None);
+        assert_eq!(parse_hours_range("08:00-19:00"), Some(((8, 0), (19, 0))));
+        assert_eq!(parse_hours_range("19:00-08:00"), None);
+        let mut c = Config::default();
+        c.notifications.internal_networks = vec!["10.0.0.0/33".into()];
+        c.notifications.business_hours = "8-19".into();
+        c.notifications.business_days = vec!["sabbath".into()];
+        assert_eq!(c.validate().unwrap_err().len(), 3);
     }
 
     #[test]

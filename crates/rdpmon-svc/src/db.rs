@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub type Result<T> = rusqlite::Result<T>;
 
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 pub const KV_INITIALIZED: &str = "initialized";
 
 pub fn ts(t: DateTime<Utc>) -> String {
@@ -53,6 +53,15 @@ pub struct Message {
     pub subject: String,
     pub text: String,
     pub html: String,
+}
+
+/// How familiar a user / source IP pair is, from RDP history.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FirstSeen {
+    NewUser,
+    NewIp,
+    NewPair,
+    Seen(DateTime<Utc>),
 }
 
 /// Share access in a period, grouped by type, account, IP and share.
@@ -145,6 +154,14 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        if v < 3 {
+            self.conn.execute_batch(
+                "BEGIN;
+                 CREATE INDEX IF NOT EXISTS ix_connections_user_ip ON connections(username COLLATE NOCASE, source_ip);
+                 PRAGMA user_version = 3;
+                 COMMIT;",
+            )?;
+        }
         Ok(())
     }
 
@@ -226,6 +243,37 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    /// Compares a new RDP connection with earlier logons / reconnections.
+    /// Call before the connection itself is recorded.
+    pub fn first_seen(&self, user: &str, ip: &str) -> Result<FirstSeen> {
+        const RDP: &str = "kind IN ('logon','reconnect')";
+        let user_last: Option<String> = self.conn.query_row(
+            &format!("SELECT max(event_time) FROM connections WHERE username = ?1 COLLATE NOCASE AND {RDP}"),
+            [user],
+            |r| r.get(0),
+        )?;
+        if user_last.is_none() {
+            return Ok(FirstSeen::NewUser);
+        }
+        let ip_seen = self
+            .conn
+            .query_row(&format!("SELECT 1 FROM connections WHERE source_ip = ?1 AND {RDP} LIMIT 1"), [ip], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !ip_seen {
+            return Ok(FirstSeen::NewIp);
+        }
+        let pair_last: Option<String> = self.conn.query_row(
+            &format!("SELECT max(event_time) FROM connections WHERE username = ?1 COLLATE NOCASE AND source_ip = ?2 AND {RDP}"),
+            [user, ip],
+            |r| r.get(0),
+        )?;
+        Ok(match pair_last.and_then(|s| parse_ts(&s)) {
+            Some(t) => FirstSeen::Seen(t),
+            None => FirstSeen::NewPair,
+        })
     }
 
     /// Failed logons in the period: (attempts, distinct source IPs).
@@ -576,6 +624,26 @@ mod tests {
         db.record_connection(&conn("jdoe", t), "PC01", "k", false, "n/a", None, 10).unwrap();
         drop(db);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn first_seen_lookup() {
+        let mut db = Db::memory();
+        let t = Utc::now() - Duration::days(3);
+        assert_eq!(db.first_seen("jdoe", "203.0.113.10").unwrap(), FirstSeen::NewUser, "fresh database");
+        db.record_connection(&conn("jdoe", t), "PC01", "k", false, "n/a", None, 10).unwrap();
+        let mut other = conn("asmith", t);
+        other.ip = "198.51.100.1".into();
+        other.refs[0].record_id = 78;
+        db.record_connection(&other, "PC01", "k", false, "n/a", None, 10).unwrap();
+        let mut failed = conn("mallory", t);
+        failed.kind = Signal::Failed;
+        failed.refs[0].record_id = 79;
+        db.record_connection(&failed, "PC01", "k", false, "n/a", None, 10).unwrap();
+        assert_eq!(db.first_seen("JDOE", "203.0.113.10").unwrap().clone(), FirstSeen::Seen(parse_ts(&ts(t)).unwrap()));
+        assert_eq!(db.first_seen("jdoe", "192.0.2.1").unwrap(), FirstSeen::NewIp);
+        assert_eq!(db.first_seen("jdoe", "198.51.100.1").unwrap(), FirstSeen::NewPair);
+        assert_eq!(db.first_seen("mallory", "203.0.113.10").unwrap(), FirstSeen::NewUser, "failed logons do not count");
     }
 
     #[test]
