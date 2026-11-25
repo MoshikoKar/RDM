@@ -255,6 +255,21 @@ fn read_config(ui: &AppWindow) -> Result<(Config, Option<String>, Option<String>
     Ok((c, smtp_pw, update_token))
 }
 
+/// True when the Updates fields differ from what the service has saved.
+fn update_settings_unsaved(ui: &AppWindow) -> bool {
+    let st = state();
+    let Some(saved) = st.base.as_ref().map(|c| &c.updates) else { return false };
+    let provider = match ui.get_update_provider() {
+        1 => UpdateProvider::Github,
+        2 => UpdateProvider::Gitlab,
+        _ => UpdateProvider::None,
+    };
+    provider != saved.provider
+        || ui.get_repo_url().trim() != saved.repository_url
+        || ui.get_signing_key().trim() != saved.signing_public_key
+        || !ui.get_update_token().trim().is_empty()
+}
+
 enum Loaded {
     Failed(String),
     Setup(StatusInfo, Config, bool, bool),
@@ -559,6 +574,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let w = ui.as_weak();
         move || {
             let Some(ui) = w.upgrade() else { return };
+            // The service checks with its saved settings, not this form.
+            if update_settings_unsaved(&ui) {
+                ui.set_update_message("".into());
+                return show(&ui, "Save the update settings first, then check for updates.", true);
+            }
             let token = token();
             ui.set_update_message("Checking...".into());
             bg(&ui, move || call(Request::CheckUpdates { token }), |ui, r| {
