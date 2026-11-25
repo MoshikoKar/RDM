@@ -4,7 +4,12 @@
 
 .EXAMPLE
   .\scripts\build.ps1
-  .\scripts\build.ps1 -ReleaseKey C:\keys\release.key -CertThumbprint 0123ABCD...
+  .\scripts\build.ps1 -Release -ReleaseKey C:\keys\release.key -CertThumbprint 0123ABCD...
+
+.PARAMETER Release
+  A build for deployment: fails unless both -ReleaseKey and -CertThumbprint
+  are given. Without -Release, a build missing either is a development build:
+  the MSI is named *-unsigned.msi and a warning is printed.
 
 .PARAMETER ReleaseKey
   Optional rdpmon-tool private key. When given, writes dist\<msi>.sig for
@@ -14,6 +19,7 @@
   to Authenticode-sign the executables and the MSI with signtool.exe.
 #>
 param(
+    [switch]$Release,
     [switch]$SkipTests,
     [string]$ReleaseKey,
     [string]$CertThumbprint,
@@ -29,6 +35,12 @@ try {
     $version = ([regex]'(?m)^version\s*=\s*"([^"]+)"').Match((Get-Content Cargo.toml -Raw)).Groups[1].Value
     if (-not $version) { throw "cannot read version from Cargo.toml" }
     Write-Host "== RDP Monitor $version"
+
+    $signed = [bool]$CertThumbprint -and [bool]$ReleaseKey
+    if ($Release -and -not $signed) {
+        Write-Host "ERROR: -Release needs both -CertThumbprint (Authenticode) and -ReleaseKey (update signature)." -ForegroundColor Red
+        exit 1
+    }
 
     if (-not $SkipTests) {
         cargo test --workspace
@@ -52,7 +64,10 @@ try {
 
     $dist = Join-Path $root "dist"
     New-Item -ItemType Directory -Force $dist | Out-Null
-    $msi = Join-Path $dist "RDPMonitor-$version-x64.msi"
+    # The update client only accepts RDPMonitor-<version>-x64.msi (with .sig),
+    # so an unsigned build can never be served as an update by mistake.
+    $suffix = if ($signed) { "" } else { "-unsigned" }
+    $msi = Join-Path $dist "RDPMonitor-$version-x64$suffix.msi"
 
     Push-Location installer
     try {
@@ -75,4 +90,12 @@ try {
     Copy-Item "$bin\rdpmon-tool.exe" $dist -Force
     Write-Host "== Built $msi"
     Get-ChildItem $dist | Format-Table Name, Length
+    if (-not $signed) {
+        $missing = @()
+        if (-not $CertThumbprint) { $missing += "no Authenticode signature (-CertThumbprint)" }
+        if (-not $ReleaseKey) { $missing += "no update signature (-ReleaseKey)" }
+        Write-Host ""
+        Write-Host "UNSIGNED BUILD - not for deployment ($($missing -join ', '))." -ForegroundColor Yellow
+        Write-Host "Use -Release with both signing options for a deployable build." -ForegroundColor Yellow
+    }
 } finally { Pop-Location }
