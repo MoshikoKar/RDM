@@ -3,12 +3,15 @@
 ## Automated tests
 
 ```powershell
-cargo test --workspace                      # 69 tests, ~10 s after build
+cargo test --workspace                      # 107 tests, ~10 s after build
 cargo test -p rdpmon-svc -- --ignored       # + live GitHub API test (needs internet)
 ```
 
-They run as an ordinary (non-elevated) user. Tests marked *live* use real
-Windows components rather than mocks.
+They run as an ordinary (non-elevated) user, so they also run on the hosted
+`windows-latest` CI runner (`.github/workflows/ci.yml`); none needs elevation
+or is ignored for that reason. `auditpol::requirements_follow_settings` reads
+the local audit policy and tolerates it being unreadable. Tests marked *live*
+use real Windows components rather than mocks.
 
 | Requirement | Tests |
 |---|---|
@@ -33,6 +36,15 @@ Windows components rather than mocks.
 | Uninstall authorization | `handler::uninstall_requires_authorization` |
 | Email injection / HTML escaping | `notify::alert_rendering_escapes_and_sanitizes`, `config::email_syntax` |
 | Security descriptors | `winsec::sddl_strings_parse` |
+| Source hostname (reverse lookup) | `resolve::rejects_unusable_input`, `notify::alert_rendering_escapes_and_sanitizes` |
+| Account domain in correlation / cooldown | `events::domain_normalization`, `correlate::same_user_name_in_different_domains_is_separate`, `correlate::fqdn_and_netbios_domain_merge`, `correlate::empty_domain_merges_with_the_session`, `correlate::local_dot_domain_matches_computer_name`, `db::cooldown_is_keyed_per_domain` |
+| One session reported from different addresses | `correlate::session_merges_across_addresses_by_session_id`, `correlate::session_merges_across_addresses_by_logon_id`, `correlate::conflicting_session_ids_do_not_merge`, `correlate::different_users_on_different_addresses_never_merge`, `correlate::ipv4_and_ipv6_of_one_client_merge` |
+| Failed logons (4625) | `events::parses_4625_network_and_rdp`, `failed::threshold_window_and_per_ip`, `failed::reasons`, `notify::failed_logon_policy_and_rendering`, `db::failed_logons_are_counted_but_not_listed_as_connections` |
+| Shared folder access (SMB) | `events::parses_share_events`, `notify::share_policy_filters_and_rendering`, `db::share_history_and_schema_upgrade`, `auditpol::*`, `config::failed_logons_follow_smb` |
+| Client-reported workstation name | `events::parses_client_reported_name`, `correlate::group_takes_first_reported_client_name` |
+| Context rows (network, first seen, off-hours) | `notify::network_classification`, `notify::business_hours_boundaries`, `notify::context_rows_in_alert`, `db::first_seen_lookup`, `config::ranges_and_hours` |
+| Disconnect / logoff emails and duration | `events::parses_lsm_logoff`, `db::session_start_lookup`, `notify::disconnect_and_logoff_notifications` |
+| Heartbeat and delivery recovery summary | `notify::heartbeat_ok_and_warning`, `notify::daily_schedule_across_the_year` (every day of a year in the local time zone, both DST changes), `notify::recovery_summary_rendering`, `delivery::recovery_summary_after_smtp_outage` (scripted SMTP server) |
 
 ## Verified in the development environment
 

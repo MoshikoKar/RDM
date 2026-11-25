@@ -175,8 +175,14 @@ that deliberate and visible, it cannot prevent it.
 Requirements: Rust (MSVC toolchain), Visual Studio Build Tools, .NET 8 SDK (for WiX 5, restored as a local tool).
 
 ```powershell
-.\scripts\build.ps1                         # tests + release build + dist\RDPMonitor-<version>-x64.msi
-.\scripts\build.ps1 -ReleaseKey C:\keys\release.key -CertThumbprint <thumbprint>
+.\scripts\build.ps1                         # development: tests + dist\RDPMonitor-<version>-x64-unsigned.msi
+.\scripts\build.ps1 -Release -ReleaseKey C:\keys\release.key -CertThumbprint <thumbprint>
 ```
+
+Without both signing options the MSI is named `*-unsigned.msi` and the script
+ends with an `UNSIGNED BUILD - not for deployment` warning; `-Release` refuses
+to build at all without them. CI (`.github/workflows/ci.yml`, windows-latest)
+runs the tests and builds an unsigned MSI on every push and pull request; the
+MSI is attached to the workflow run as an artifact.
 
 Testing: [docs/TESTING.md](docs/TESTING.md).

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (stable, MSVC)
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The code base is not rustfmt-formatted yet; report, do not block.
+      - name: cargo fmt --check (informational)
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      - name: cargo clippy (informational)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      # Proves the MSI builds. No signing secrets in CI: the result is an
+      # unsigned development build (named *-unsigned.msi).
+      - name: Build MSI
+        shell: pwsh
+        run: .\scripts\build.ps1 -SkipTests
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi-unsigned
+          path: |
+            dist/*.msi
+            dist/rdpmon-tool.exe
+          if-no-files-found: error

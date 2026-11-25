@@ -11,10 +11,12 @@ an update never downloads or applies configuration.
 2. Build and sign on a secured build machine:
 
    ```powershell
-   .\scripts\build.ps1 -ReleaseKey D:\keys\release.key [-CertThumbprint <code-signing cert>]
+   .\scripts\build.ps1 -Release -ReleaseKey D:\keys\release.key -CertThumbprint <code-signing cert>
    ```
 
    This produces `dist\RDPMonitor-0.1.2-x64.msi` and `dist\RDPMonitor-0.1.2-x64.msi.sig`.
+   (`-Release` fails without both keys; a build without them is named
+   `*-unsigned.msi`, which the update client never accepts.)
    Check it: `rdpmon-tool verify-release --pub release.pub --file dist\RDPMonitor-0.1.2-x64.msi --version 0.1.2`
 3. Publish a release whose tag is the version (`v0.1.2` or `0.1.2`) with **both
    files attached under exactly these names**.
