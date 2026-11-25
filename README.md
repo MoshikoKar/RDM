@@ -86,6 +86,13 @@ the service pick up events that happened while it was stopped.
 Undelivered emails are queued in SQLite and retried with exponential backoff
 (1 min ... 1 h) for up to 72 h; monitoring never waits for email.
 
+Optional health emails (`[heartbeat]`, off by default): a daily heartbeat at a
+set local time (version, uptime, event channel status including audit policy
+warnings, connections in the last 24 h, queue) with subject `... OK` or
+`... WARNING` when a channel is not active or emails have waited over an hour;
+and `recovery_summary`, one email after an SMTP outage saying how long delivery
+failed and how many alerts were delayed, dropped (queue full) or given up.
+
 > 4778/4779 need *Audit Other Logon/Logoff Events* (Success). Without it the
 > Session Manager events still detect reconnections.
 > `auditpol /set /subcategory:"Other Logon/Logoff Events" /success:enable`

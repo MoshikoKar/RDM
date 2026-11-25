@@ -5,6 +5,7 @@ use crate::db::{ConnRow, Message, ShareRow};
 use crate::events::Signal;
 use chrono::{DateTime, Datelike, Duration, Local, LocalResult, NaiveDate, TimeZone, Timelike, Utc};
 use rdpmon_core::config::{Config, ReportConfig};
+use rdpmon_core::ipc::ChannelStatus;
 use std::collections::BTreeMap;
 
 pub const ST_QUEUED: &str = "queued";
@@ -407,6 +408,16 @@ pub fn share_message(c: &Connection, host: &str, source_host: Option<&str>, cfg:
 
 // ---------------- weekly report ----------------
 
+/// Local h:m on day `d`; skipped (DST) times move one hour later and
+/// repeated ones take the first occurrence.
+fn slot_on(d: NaiveDate, h: u32, m: u32) -> Option<DateTime<Local>> {
+    Some(match Local.from_local_datetime(&d.and_hms_opt(h, m, 0)?) {
+        LocalResult::Single(t) => t,
+        LocalResult::Ambiguous(t, _) => t,
+        LocalResult::None => Local.from_local_datetime(&d.and_hms_opt(h, m, 0)?.checked_add_signed(Duration::hours(1))?).earliest()?,
+    })
+}
+
 /// The most recent scheduled report time at or before `now`.
 pub fn last_report_slot(r: &ReportConfig, now: DateTime<Local>) -> Option<DateTime<Local>> {
     let wd = rdpmon_core::config::parse_weekday(&r.day)?;
@@ -414,17 +425,96 @@ pub fn last_report_slot(r: &ReportConfig, now: DateTime<Local>) -> Option<DateTi
     let today = now.date_naive();
     let back = (7 + today.weekday().num_days_from_monday() as i64 - wd.num_days_from_monday() as i64) % 7;
     for extra in [0i64, 7] {
-        let d: NaiveDate = today - Duration::days(back + extra);
-        let slot = match Local.from_local_datetime(&d.and_hms_opt(h, m, 0)?) {
-            LocalResult::Single(t) => t,
-            LocalResult::Ambiguous(t, _) => t,
-            LocalResult::None => Local.from_local_datetime(&d.and_hms_opt(h, m, 0)?.checked_add_signed(Duration::hours(1))?).earliest()?,
-        };
+        let slot = slot_on(today - Duration::days(back + extra), h, m)?;
         if slot <= now {
             return Some(slot);
         }
     }
     None
+}
+
+/// The most recent daily slot (`HH:MM` local) at or before `now`.
+pub fn last_daily_slot(time: &str, now: DateTime<Local>) -> Option<DateTime<Local>> {
+    let (h, m) = rdpmon_core::config::parse_hhmm(time)?;
+    let today = now.date_naive();
+    for back in [0i64, 1, 2] {
+        let slot = slot_on(today - Duration::days(back), h, m)?;
+        if slot <= now {
+            return Some(slot);
+        }
+    }
+    None
+}
+
+pub fn next_daily_slot(time: &str, now: DateTime<Local>) -> Option<DateTime<Local>> {
+    let last = last_daily_slot(time, now)?;
+    last_daily_slot(time, last + Duration::days(1) + Duration::hours(2)).filter(|t| *t > now)
+}
+
+/// Inputs of the daily heartbeat.
+pub struct HeartbeatInfo {
+    pub host: String,
+    pub uptime: Duration,
+    pub channels: Vec<ChannelStatus>,
+    pub connections_24h: usize,
+    pub pending: u64,
+    pub oldest_pending: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub now: DateTime<Utc>,
+}
+
+pub fn heartbeat_message(i: &HeartbeatInfo) -> Message {
+    let mut problems = Vec::new();
+    if i.channels.is_empty() {
+        problems.push("No event log channel is being monitored.".to_string());
+    }
+    for c in &i.channels {
+        if c.state != "active" {
+            problems.push(format!("{} is {}.", c.name, c.state));
+        } else if c.detail.contains("WARNING") {
+            problems.push(format!("{}: {}", c.name, c.detail));
+        }
+    }
+    if let Some(t) = i.oldest_pending {
+        if i.now - t > Duration::hours(1) {
+            problems.push(format!("Emails have been waiting in the queue since {}.", local(t)));
+        }
+    }
+    let state = if problems.is_empty() { "OK" } else { "WARNING" };
+    let subject = one_line(&format!("RDP Monitor heartbeat: {} {state}", i.host), 200);
+    let mut rows = vec![
+        ("Computer", i.host.clone()),
+        ("Status", state.to_string()),
+        ("Agent version", rdpmon_core::VERSION.to_string()),
+        ("Running for", duration_text(i.uptime)),
+    ];
+    let channels: Vec<String> = i.channels.iter().map(|c| format!("{}: {} ({})", c.name, c.state, c.detail)).collect();
+    rows.push(("Event channels", if channels.is_empty() { "none".into() } else { channels.join(" | ") }));
+    rows.push(("RDP connections (24 h)", i.connections_24h.to_string()));
+    rows.push(("Emails waiting", i.pending.to_string()));
+    rows.push(("Last delivery error", i.last_error.clone().unwrap_or_else(|| "none".into())));
+    let (text, html) = render(&format!("RDP Monitor heartbeat - {state}"), &rows, &problems, &format!("Sent daily at {}.", local(i.now)));
+    Message { subject, text, html }
+}
+
+/// One summary after email delivery recovers from an outage.
+pub fn recovery_message(host: &str, since: DateTime<Utc>, until: DateTime<Utc>, delayed: usize, dropped: u64, failed: u64) -> Message {
+    let subject = one_line(&format!("RDP Monitor: email delivery restored on {host}"), 200);
+    let rows = vec![
+        ("Computer", host.to_string()),
+        ("Delivery failing since", local(since)),
+        ("Delivery restored", local(until)),
+        ("Outage", duration_text(until - since)),
+        ("Delayed notifications", delayed.to_string()),
+        ("Dropped (queue full)", dropped.to_string()),
+        ("Given up (retry period over)", failed.to_string()),
+    ];
+    let mut notes = vec![format!("{delayed} notification(s) were delayed and are being delivered now.")];
+    if dropped + failed > 0 {
+        notes.push("Some notifications were lost; check the history in the configuration utility for the connections in this period.".into());
+    }
+    let (text, html) = render("Email delivery restored", &rows, &notes, "");
+    Message { subject, text, html }
 }
 
 pub fn next_report_slot(r: &ReportConfig, now: DateTime<Local>) -> Option<DateTime<Local>> {
@@ -777,6 +867,69 @@ mod tests {
         assert_eq!(duration_text(Duration::seconds(30)), "less than 1 min");
         assert_eq!(duration_text(Duration::minutes(45)), "45 min");
         assert_eq!(duration_text(Duration::minutes(60 * 26 + 5)), "1 d 2 h 5 min");
+    }
+
+    fn hb(channels: Vec<ChannelStatus>, oldest: Option<DateTime<Utc>>) -> HeartbeatInfo {
+        let now = Utc::now();
+        HeartbeatInfo {
+            host: "PC01".into(),
+            uptime: Duration::minutes(75),
+            channels,
+            connections_24h: 3,
+            pending: oldest.map_or(0, |_| 2),
+            oldest_pending: oldest,
+            last_error: None,
+            now,
+        }
+    }
+
+    #[test]
+    fn heartbeat_ok_and_warning() {
+        let ok = |n: &str| ChannelStatus { name: n.into(), state: "active".into(), detail: "resumed from bookmark".into() };
+        let m = heartbeat_message(&hb(vec![ok("Security"), ok("LSM")], None));
+        assert_eq!(m.subject, "RDP Monitor heartbeat: PC01 OK");
+        assert!(m.text.contains("Running for:") && m.text.contains("1 h 15 min"));
+        assert!(m.text.contains("RDP connections (24 h): 3"));
+        let err = ChannelStatus { name: "Security".into(), state: "error".into(), detail: "access <denied>".into() };
+        let w = heartbeat_message(&hb(vec![err, ok("LSM")], None));
+        assert!(w.subject.ends_with("WARNING"));
+        assert!(w.text.contains("Security is error."));
+        assert!(w.html.contains("access &lt;denied&gt;"));
+        let queued = heartbeat_message(&hb(vec![ok("Security")], Some(Utc::now() - Duration::hours(2))));
+        assert!(queued.subject.ends_with("WARNING") && queued.text.contains("waiting in the queue"));
+        assert!(heartbeat_message(&hb(vec![ok("Security")], Some(Utc::now() - Duration::minutes(5)))).subject.ends_with("OK"));
+        let audit = ChannelStatus { name: "Security".into(), state: "active".into(), detail: "started; WARNING: 'File Share' success auditing is off".into() };
+        assert!(heartbeat_message(&hb(vec![audit], None)).subject.ends_with("WARNING"));
+        assert!(heartbeat_message(&hb(vec![], None)).subject.ends_with("WARNING"));
+    }
+
+    #[test]
+    fn recovery_summary_rendering() {
+        let t = Utc::now();
+        let m = recovery_message("PC01", t - Duration::minutes(90), t, 4, 1, 0);
+        assert!(m.subject.contains("delivery restored on PC01"));
+        assert!(m.text.contains("Delayed notifications: 4") && m.text.contains("Dropped (queue full): 1"));
+        assert!(m.text.contains("1 h 30 min") && m.text.contains("were lost"));
+    }
+
+    #[test]
+    fn daily_schedule_across_the_year() {
+        // Every day of the year, including both DST changes of the local
+        // time zone: exactly one slot per day, at the configured time.
+        let mut day = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        while day.year() == 2026 {
+            let noon = slot_on(day, 12, 0).unwrap();
+            let last = last_daily_slot("08:00", noon).unwrap();
+            assert_eq!(last.date_naive(), day);
+            assert_eq!((last.hour(), last.minute()), (8, 0));
+            let next = next_daily_slot("08:00", noon).unwrap();
+            assert_eq!(next.date_naive(), day.succ_opt().unwrap(), "next slot is tomorrow");
+            let early = slot_on(day, 7, 0).unwrap();
+            assert_eq!(next_daily_slot("08:00", early).unwrap(), last, "before 08:00 the next slot is today");
+            assert_eq!(last_daily_slot("08:00", early).unwrap().date_naive(), day.pred_opt().unwrap());
+            day = day.succ_opt().unwrap();
+        }
+        assert_eq!(last_daily_slot("8am", Local::now()), None);
     }
 
     #[test]

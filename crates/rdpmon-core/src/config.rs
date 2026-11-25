@@ -203,6 +203,25 @@ impl Default for ReportConfig {
     }
 }
 
+/// Daily sign-of-life email and email-delivery recovery summary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HeartbeatConfig {
+    pub enabled: bool,
+    /// Local time, HH:MM (24h).
+    pub time: String,
+    /// Empty = use the notification recipients.
+    pub recipients: Vec<String>,
+    /// After an email outage, send one summary of delayed / dropped alerts.
+    pub recovery_summary: bool,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self { enabled: false, time: "08:00".into(), recipients: Vec::new(), recovery_summary: false }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RetentionConfig {
@@ -265,6 +284,7 @@ pub struct Config {
     pub failed_logons: FailedLogonConfig,
     pub smb: SmbConfig,
     pub report: ReportConfig,
+    pub heartbeat: HeartbeatConfig,
     pub retention: RetentionConfig,
     pub security: SecurityConfig,
     pub updates: UpdateConfig,
@@ -402,6 +422,15 @@ impl Config {
         }
         if r.enabled && smtp_used && r.recipients.is_empty() && s.to.is_empty() {
             errs.push("Weekly report needs recipients.".into());
+        }
+        let h = &self.heartbeat;
+        if parse_hhmm(&h.time).is_none() {
+            errs.push(format!("Heartbeat time '{}' must be HH:MM (24-hour).", h.time));
+        }
+        for a in &h.recipients {
+            if !is_valid_email(a) {
+                errs.push(format!("Heartbeat recipient '{a}' is not a valid email address."));
+            }
         }
         let t = &self.retention;
         for (label, v) in [("History", t.history_days), ("Audit", t.audit_days), ("Notification queue", t.outbox_days)] {
