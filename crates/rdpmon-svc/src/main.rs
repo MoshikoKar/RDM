@@ -15,6 +15,7 @@ mod logging;
 mod mail;
 mod monitor;
 mod notify;
+mod resolve;
 mod service;
 mod store;
 mod update;

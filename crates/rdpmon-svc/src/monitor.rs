@@ -282,7 +282,10 @@ fn handle_connection(shared: &Shared, db: &mut Db, cfg: &rdpmon_core::config::Co
     let recovered = c.time < shared.started - chrono::Duration::seconds(5);
     let last = db.cooldown_last(&c.key()).ok().flatten();
     let status = notify::decide(c, cfg, last);
-    let msg = (status == notify::ST_QUEUED).then(|| notify::alert_message(c, &shared.host, cfg, recovered));
+    let msg = (status == notify::ST_QUEUED).then(|| {
+        let source_host = crate::resolve::hostname(&c.ip, crate::resolve::TIMEOUT);
+        notify::alert_message(c, &shared.host, source_host.as_deref(), cfg, recovered)
+    });
     match db.record_connection(c, &shared.host, recovered, status, msg, cfg.notifications.max_queue) {
         Ok((_, dropped)) => {
             logging::info(&format!(

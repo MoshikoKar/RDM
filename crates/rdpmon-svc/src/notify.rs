@@ -75,7 +75,8 @@ h2{font-size:17px;margin:0 0 12px}table{border-collapse:collapse}\
 th,td{border:1px solid #d0d7de;padding:5px 9px;text-align:left;vertical-align:top}\
 th{background:#f3f4f6;font-weight:600}.muted{color:#656d76;font-size:12px}";
 
-pub fn alert_message(c: &Connection, host: &str, cfg: &Config, recovered: bool) -> Message {
+/// `source_host` is the reverse-resolved name of the source IP, if any.
+pub fn alert_message(c: &Connection, host: &str, source_host: Option<&str>, cfg: &Config, recovered: bool) -> Message {
     let user_full = if c.domain.is_empty() { c.user.clone() } else { format!("{}\\{}", c.domain, c.user) };
     let when = local(c.time);
     let kind = type_label(c.kind);
@@ -105,6 +106,7 @@ pub fn alert_message(c: &Connection, host: &str, cfg: &Config, recovered: bool) 
         ("Computer", host.to_string()),
         ("User", user_full),
         ("Source IP", c.ip.clone()),
+        ("Source hostname", source_host.unwrap_or("could not be resolved").to_string()),
         ("Connection type", kind.to_string()),
         ("Date and time", when),
         ("Session ID", session),
@@ -313,11 +315,14 @@ mod tests {
         c.notifications.subject_format = "{type}: {user} from {ip} on {host}".into();
         let mut x = conn(Signal::Reconnect, Utc::now());
         x.user = "<script>\r\nBcc: evil".into();
-        let m = alert_message(&x, "PC01", &c, true);
+        let m = alert_message(&x, "PC01", Some("ITMOSHE.corp.example"), &c, true);
         assert!(!m.subject.contains('\n') && !m.subject.contains('\r'));
         assert!(m.subject.starts_with("Reconnection: "));
         assert!(m.html.contains("&lt;script&gt;") && !m.html.contains("<script>"));
         assert!(m.text.contains("Source IP:") && m.text.contains("recovered"));
+        assert!(m.text.contains("Source hostname:   ITMOSHE.corp.example"));
+        let unresolved = alert_message(&x, "PC01", None, &c, false);
+        assert!(unresolved.html.contains("<th>Source hostname</th><td>could not be resolved</td>"));
     }
 
     #[test]
