@@ -56,6 +56,9 @@ pub struct Observation {
     pub share: String,
     /// 5145: file or folder inside the share.
     pub path: String,
+    /// Name the client reports for itself (4624 WorkstationName, 4778/4779
+    /// ClientName). Chosen by the client: display only, never for filtering.
+    pub client_name: String,
 }
 
 /// Canonical form of an account domain so the forms used by different events
@@ -117,6 +120,7 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
     let mut logon_id = None;
     let (mut logon_type, mut status) = (String::new(), String::new());
     let (mut share, mut path) = (String::new(), String::new());
+    let mut client_name = String::new();
     let (signal, user, domain, ip, session_id) = match (channel.as_str(), event_id) {
         (CH_SECURITY, 5140 | 5145) => {
             let kw = text(child(system, "Keywords"));
@@ -146,10 +150,12 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
                 return Err(Skip::Irrelevant);
             }
             logon_id = normalize_logon_id(&data("TargetLogonId"));
+            client_name = normalize_client_name(&data("WorkstationName"));
             (Signal::NewLogon, data("TargetUserName"), data("TargetDomainName"), data("IpAddress"), None)
         }
         (CH_SECURITY, 4778 | 4779) => {
             logon_id = normalize_logon_id(&data("LogonID"));
+            client_name = normalize_client_name(&data("ClientName"));
             let sig = if event_id == 4778 { Signal::Reconnect } else { Signal::Disconnect };
             (sig, data("AccountName"), data("AccountDomain"), data("ClientAddress"), None)
         }
@@ -174,11 +180,18 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
         return Err(Skip::Irrelevant);
     }
     let (user, domain) = (one_line(&user, 256), one_line(&domain, 256));
-    Ok(Observation { channel, record_id, event_id, time, signal, user, domain, ip, session_id, logon_id, logon_type, status, share, path })
+    Ok(Observation { channel, record_id, event_id, time, signal, user, domain, ip, session_id, logon_id, logon_type, status, share, path, client_name })
 }
 
 fn one_line(s: &str, max: usize) -> String {
     s.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
+/// "-" and empty mean not reported; single line, at most 64 characters.
+fn normalize_client_name(s: &str) -> String {
+    let s = one_line(s.trim(), 64);
+    let s = s.trim();
+    if s == "-" { String::new() } else { s.to_string() }
 }
 
 fn normalize_logon_id(s: &str) -> Option<String> {
@@ -248,7 +261,8 @@ pub mod samples {
     pub fn logon4624(rec: u64, time: &str, user: &str, ip: &str, logon_type: &str) -> String {
         security(4624, rec, time, &[
             ("SubjectUserSid", "S-1-5-18"), ("TargetUserName", user), ("TargetDomainName", "CORP"),
-            ("TargetLogonId", "0x3e7a1"), ("LogonType", logon_type), ("IpAddress", ip), ("IpPort", "0"),
+            ("TargetLogonId", "0x3e7a1"), ("LogonType", logon_type), ("WorkstationName", "LAPTOP7"),
+            ("IpAddress", ip), ("IpPort", "0"),
         ])
     }
 
@@ -354,6 +368,19 @@ mod tests {
         assert_eq!(parse(&share_event(5140, 14, T, "jdoe", "10.10.1.222", r"\\*\C$", "", true), true).unwrap().signal, Signal::ShareDenied);
         assert!(parse(&share_event(5140, 15, T, "PC02$", "10.10.1.5", r"\\*\IPC$", "", false), true).is_ok(), "machine-like names still count");
         assert_eq!(parse(&share_event(5140, 16, T, "jdoe", "::1", r"\\*\C$", "", false), true), Err(Skip::Irrelevant));
+    }
+
+    #[test]
+    fn parses_client_reported_name() {
+        assert_eq!(parse(&logon4624(1, T, "jdoe", "198.51.100.25", "10"), true).unwrap().client_name, "LAPTOP7");
+        assert_eq!(parse(&session4778(4778, 2, T, "jdoe", "198.51.100.25"), true).unwrap().client_name, "LAPTOP7");
+        assert_eq!(parse(&lsm(21, 3, T, r"CORP\jdoe", "198.51.100.25", 2), true).unwrap().client_name, "");
+        let named = |w: &str| {
+            security(4624, 4, T, &[("TargetUserName", "jdoe"), ("TargetDomainName", "CORP"), ("LogonType", "10"), ("WorkstationName", w), ("IpAddress", "198.51.100.25")])
+        };
+        assert_eq!(parse(&named("-"), true).unwrap().client_name, "");
+        assert_eq!(parse(&named("EVIL&#13;&#10;Bcc: x"), true).unwrap().client_name, "EVILBcc: x", "control characters stripped");
+        assert_eq!(parse(&named(&"A".repeat(100)), true).unwrap().client_name.len(), 64);
     }
 
     #[test]

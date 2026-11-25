@@ -65,7 +65,10 @@ Events for the same account and source IP within 30 s are merged into one connec
 `corp.local` are the same domain). If the events of one session report different
 addresses (RD Gateway or NAT in front of the host, IPv4 and IPv6 of one client),
 they are still merged unless their session or logon IDs differ; the 4624 address
-is then the Source IP and the others are listed as "Other addresses seen". Only
+is then the Source IP and the others are listed as "Other addresses seen". The
+alert also shows the name the client reports for itself (4624 WorkstationName /
+4778 ClientName) as "Client workstation (reported)"; any client can send any
+name, so it is shown for information only and never used for filtering. Only
 RDP-specific events are selected (non-RDP logons such as network or service
 logons never reach the agent); built-in identities (`NT AUTHORITY`,
 `Window Manager`, `Font Driver Host`) and console (`LOCAL`) sessions are ignored.

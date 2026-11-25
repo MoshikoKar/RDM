@@ -172,6 +172,10 @@ pub fn alert_message(c: &Connection, host: &str, source_host: Option<&str>, cfg:
         ("User", user_full),
         ("Source IP", c.ip.clone()),
         ("Source hostname", source_host.unwrap_or("could not be resolved").to_string()),
+        (
+            "Client workstation (reported)",
+            if c.client_name.is_empty() { "not reported".to_string() } else { one_line(&c.client_name, 64) },
+        ),
     ];
     if !c.other_ips.is_empty() {
         rows.push(("Other addresses seen", c.other_ips.join(", ")));
@@ -527,6 +531,14 @@ mod tests {
         let unresolved = alert_message(&x, "PC01", None, &c, false);
         assert!(unresolved.html.contains("<th>Source hostname</th><td>could not be resolved</td>"));
         assert!(!unresolved.text.contains("Other addresses seen"));
+        assert!(unresolved.text.contains("Client workstation (reported): not reported"));
+        x.client_name = "<b>x</b>".into();
+        let named = alert_message(&x, "PC01", None, &c, false);
+        assert!(named.html.contains("<th>Client workstation (reported)</th><td>&lt;b&gt;x&lt;/b&gt;</td>"));
+        assert!(named.text.contains("Client workstation (reported): <b>x</b>"));
+        let order = |m: &str| ["Source IP", "Source hostname", "Client workstation (reported)"].map(|k| m.find(k).unwrap());
+        let o = order(&named.text);
+        assert!(o[0] < o[1] && o[1] < o[2], "row order");
         x.other_ips = vec!["10.0.0.1".into()];
         assert!(alert_message(&x, "PC01", None, &c, false).html.contains("<th>Other addresses seen</th><td>10.0.0.1</td>"));
     }
