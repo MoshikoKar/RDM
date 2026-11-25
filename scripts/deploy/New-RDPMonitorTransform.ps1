@@ -6,7 +6,7 @@
   group (site, department, server role).
 
 .EXAMPLE
-  .\New-RDPMonitorTransform.ps1 -MsiPath .\RDPMonitor-0.1.1-x64.msi `
+  .\New-RDPMonitorTransform.ps1 -MsiPath .\RDPMonitor-0.2.0-x64.msi `
      -TrustedConfigKey (Get-Content .\cfg.pub) `
      -ConfigPackage "\\fs01\deploy$\rdpmon\site-a.rdpcfg" -OutFile .\site-a.mst
 #>

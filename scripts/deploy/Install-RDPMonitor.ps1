@@ -12,7 +12,7 @@
 
 .EXAMPLE
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File Install-RDPMonitor.ps1 `
-    -MsiPath \\fs01\deploy$\rdpmon\RDPMonitor-0.1.1-x64.msi `
+    -MsiPath \\fs01\deploy$\rdpmon\RDPMonitor-0.2.0-x64.msi `
     -TrustedConfigKey "2hmFowmQBPgKUEK72t3e+ln4S1d6O6OSfURdnr2kn/A=" `
     -ConfigPackage \\fs01\deploy$\rdpmon\site-a.rdpcfg
 

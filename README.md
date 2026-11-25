@@ -26,7 +26,7 @@ before email is configured.
 **Silent / GPO / Vicarius:** see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ```powershell
-msiexec /i RDPMonitor-0.1.1-x64.msi /qn /norestart /l*v C:\Windows\Temp\rdpmon-install.log `
+msiexec /i RDPMonitor-0.2.0-x64.msi /qn /norestart /l*v C:\Windows\Temp\rdpmon-install.log `
   TRUSTED_CONFIG_KEY="<base64 public key>" CONFIG_PACKAGE="\\server\share\rdpmon\site-a.rdpcfg"
 ```
 

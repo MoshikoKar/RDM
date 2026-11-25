@@ -90,10 +90,10 @@ account and never displays them again.
 
 ```powershell
 # Plain install (no email yet; an administrator finishes setup in the UI)
-msiexec /i RDPMonitor-0.1.1-x64.msi /qn /norestart /l*v C:\Windows\Temp\rdpmon-install.log
+msiexec /i RDPMonitor-0.2.0-x64.msi /qn /norestart /l*v C:\Windows\Temp\rdpmon-install.log
 
 # Preconfigured install
-msiexec /i RDPMonitor-0.1.1-x64.msi /qn /norestart /l*v C:\Windows\Temp\rdpmon-install.log ^
+msiexec /i RDPMonitor-0.2.0-x64.msi /qn /norestart /l*v C:\Windows\Temp\rdpmon-install.log ^
   TRUSTED_CONFIG_KEY="2hmFowmQBPgKUEK72t3e+ln4S1d6O6OSfURdnr2kn/A=" ^
   CONFIG_PACKAGE="\\fs01\deploy$\rdpmon\site-a.rdpcfg"
 ```
@@ -142,7 +142,7 @@ GPO Software Installation cannot pass msiexec properties, so create a transform
 per configuration group:
 
 ```powershell
-.\scripts\deploy\New-RDPMonitorTransform.ps1 -MsiPath .\RDPMonitor-0.1.1-x64.msi `
+.\scripts\deploy\New-RDPMonitorTransform.ps1 -MsiPath .\RDPMonitor-0.2.0-x64.msi `
   -TrustedConfigKey (Get-Content .\cfg.pub) `
   -ConfigPackage "\\fs01\deploy$\rdpmon\site-a.rdpcfg" -OutFile .\site-a.mst
 ```
@@ -162,7 +162,7 @@ PowerShell Scripts*: add `Install-RDPMonitor.ps1` from `scripts\deploy` with
 parameters:
 
 ```
--MsiPath \\fs01\deploy$\rdpmon\RDPMonitor-0.1.1-x64.msi -TrustedConfigKey 2hmFowmQ...= -ConfigPackage \\fs01\deploy$\rdpmon\site-a.rdpcfg
+-MsiPath \\fs01\deploy$\rdpmon\RDPMonitor-0.2.0-x64.msi -TrustedConfigKey 2hmFowmQ...= -ConfigPackage \\fs01\deploy$\rdpmon\site-a.rdpcfg
 ```
 
 At every startup it installs or upgrades when the MSI on the share is newer,
