@@ -15,8 +15,10 @@ pub enum Signal {
     NewLogon,
     /// 4778, LSM 25.
     Reconnect,
-    /// 4779, LSM 24 (history only).
+    /// 4779, LSM 24 (emailed only when enabled).
     Disconnect,
+    /// LSM 23: session logoff (no address). Never correlated.
+    Logoff,
     /// 4625 LogonType 3 or 10: failed logon. Never correlated into a session.
     Failed,
     /// 5140 (success): a shared folder was opened.
@@ -28,7 +30,7 @@ pub enum Signal {
 impl Signal {
     /// Events handled outside the RDP session correlation.
     pub fn is_standalone(self) -> bool {
-        matches!(self, Signal::Failed | Signal::ShareAccess | Signal::ShareDenied)
+        matches!(self, Signal::Failed | Signal::ShareAccess | Signal::ShareDenied | Signal::Logoff)
     }
 }
 
@@ -160,9 +162,10 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
             (sig, data("AccountName"), data("AccountDomain"), data("ClientAddress"), None)
         }
         (CH_RCM, 1149) => (Signal::Auth, user_data("Param1"), user_data("Param2"), user_data("Param3"), None),
-        (CH_LSM, 21 | 24 | 25) => {
+        (CH_LSM, 21 | 23 | 24 | 25) => {
             let sig = match event_id {
                 21 => Signal::NewLogon,
+                23 => Signal::Logoff,
                 24 => Signal::Disconnect,
                 _ => Signal::Reconnect,
             };
@@ -176,7 +179,8 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
     // A failed logon may name no (or a nonsense) account; only built-in
     // identities are excluded.
     let relevant = if signal == Signal::Failed { !is_builtin_domain(&domain) } else { is_relevant_user(&user, &domain) };
-    if !relevant || ip.is_empty() || (ignore_loopback && is_loopback(&ip)) {
+    // A logoff has no address: it is matched to its session by session ID.
+    if !relevant || (ip.is_empty() && signal != Signal::Logoff) || (ignore_loopback && is_loopback(&ip)) {
         return Err(Skip::Irrelevant);
     }
     let (user, domain) = (one_line(&user, 256), one_line(&domain, 256));
@@ -381,6 +385,13 @@ mod tests {
         assert_eq!(parse(&named("-"), true).unwrap().client_name, "");
         assert_eq!(parse(&named("EVIL&#13;&#10;Bcc: x"), true).unwrap().client_name, "EVILBcc: x", "control characters stripped");
         assert_eq!(parse(&named(&"A".repeat(100)), true).unwrap().client_name.len(), 64);
+    }
+
+    #[test]
+    fn parses_lsm_logoff() {
+        let xml = user_data(CH_LSM, 23, 20, T, r"<User>CORP\jdoe</User><SessionID>4</SessionID>");
+        let o = parse(&xml, true).unwrap();
+        assert_eq!((o.signal, o.user.as_str(), o.domain.as_str(), o.ip.as_str(), o.session_id), (Signal::Logoff, "jdoe", "CORP", "", Some(4)));
     }
 
     #[test]

@@ -92,6 +92,14 @@ Undelivered emails are queued in SQLite and retried with exponential backoff
 
 ### Optional alerts (all off by default)
 
+**Disconnections and logoffs** (`notify_disconnects`, `notify_logoffs`): an
+email when a session is disconnected (4779 / LSM 24) or the user logs off
+(LSM 23, subscribed only when enabled), with session start, end and duration.
+The start is the user's latest logon or reconnection with the same session ID
+(or from the same IP); "unknown" when there is none, e.g. a session that began
+before the agent was installed, or a local console session. These have their own
+quiet period and never affect logon alerts.
+
 **Failed logons** (`[failed_logons]`): subscribes to Security 4625 with
 LogonType 3 or 10. With NLA (the default) a wrong RDP password is logged as a
 *network* (type 3) logon, so the count also includes failed file-share and other

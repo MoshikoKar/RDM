@@ -71,6 +71,10 @@ pub struct NotificationConfig {
     pub subject_format: String,
     pub notify_new_logons: bool,
     pub notify_reconnects: bool,
+    /// Email when a session is disconnected (4779 / LSM 24). Off by default.
+    pub notify_disconnects: bool,
+    /// Email when a user logs off (LSM 23, subscribed only when on).
+    pub notify_logoffs: bool,
     /// 0 = notify on every distinct connection.
     pub cooldown_minutes: u32,
     /// Maximum number of undelivered notifications kept in the queue.
@@ -91,6 +95,8 @@ impl Default for NotificationConfig {
             subject_format: "RDP ALERT: {user} from {ip} to {host}".into(),
             notify_new_logons: true,
             notify_reconnects: true,
+            notify_disconnects: false,
+            notify_logoffs: false,
             cooldown_minutes: 15,
             max_queue: 500,
             retry_hours: 72,
@@ -357,6 +363,9 @@ impl Config {
         let m = &self.monitoring;
         if !m.security_log && !m.session_manager_log {
             errs.push("Enable at least one of the Security log or the Session Manager log.".into());
+        }
+        if self.notifications.notify_logoffs && !m.session_manager_log {
+            errs.push("Logoff notifications need the Session Manager log.".into());
         }
         if m.recovery_max_hours > 24 * 31 {
             errs.push("Event recovery period cannot exceed 744 hours (31 days).".into());

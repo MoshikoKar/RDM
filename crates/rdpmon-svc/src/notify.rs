@@ -22,6 +22,9 @@ pub fn decide(c: &Connection, cfg: &Config, last_notified: Option<DateTime<Utc>>
     let enabled = match c.kind {
         Signal::NewLogon => n.notify_new_logons,
         Signal::Reconnect => n.notify_reconnects,
+        // Opt-in; when off these stay "history only" as before.
+        Signal::Disconnect if n.notify_disconnects => true,
+        Signal::Logoff if n.notify_logoffs => true,
         _ => return ST_NA,
     };
     if !enabled {
@@ -146,6 +149,27 @@ pub fn first_seen_text(f: &crate::db::FirstSeen) -> String {
 pub struct AlertContext {
     pub source_host: Option<String>,
     pub first_seen: Option<String>,
+    /// Disconnect / logoff: when the session (or its last reconnection) began.
+    pub session_start: Option<DateTime<Utc>>,
+}
+
+/// Disconnections and logoffs end a session.
+pub fn is_session_end(k: Signal) -> bool {
+    matches!(k, Signal::Disconnect | Signal::Logoff)
+}
+
+/// "1 h 12 min", "3 d 2 h 0 min", "less than 1 min".
+pub fn duration_text(d: Duration) -> String {
+    let m = d.num_minutes();
+    if m < 1 {
+        return "less than 1 min".into();
+    }
+    let (days, h, min) = (m / 1440, m % 1440 / 60, m % 60);
+    match (days, h) {
+        (0, 0) => format!("{min} min"),
+        (0, _) => format!("{h} h {min} min"),
+        _ => format!("{days} d {h} h {min} min"),
+    }
 }
 
 pub fn local(t: DateTime<Utc>) -> String {
@@ -176,6 +200,7 @@ pub fn type_label(k: Signal) -> &'static str {
         Signal::NewLogon => "New login",
         Signal::Reconnect => "Reconnection",
         Signal::Disconnect => "Disconnection",
+        Signal::Logoff => "Logoff",
         Signal::Auth => "Authentication",
         Signal::Failed => "Failed logon",
         Signal::ShareAccess => "Share access",
@@ -211,14 +236,18 @@ pub fn alert_message(c: &Connection, host: &str, ctx: &AlertContext, cfg: &Confi
     } else {
         ""
     };
-    let cooldown = match cfg.notifications.cooldown_minutes {
-        0 => "Every distinct connection is reported.".to_string(),
-        m => format!("Further connections by this user from this IP are not reported for {m} minutes."),
+    let end = is_session_end(c.kind);
+    let cooldown = match (cfg.notifications.cooldown_minutes, end) {
+        (0, _) => "Every distinct connection is reported.".to_string(),
+        (m, false) => format!("Further connections by this user from this IP are not reported for {m} minutes."),
+        (m, true) => format!("Further disconnections and logoffs by this user from this IP are not reported for {m} minutes."),
     };
+    let title = if end { "Remote Desktop session ended" } else { "Remote Desktop connection detected" };
+    let subject = if end { one_line(&format!("RDP {kind}: {} from {} on {host}", c.user, if c.ip.is_empty() { "unknown address" } else { &c.ip }), 200) } else { subject };
     let mut rows = vec![
         ("Computer", host.to_string()),
         ("User", user_full),
-        ("Source IP", c.ip.clone()),
+        ("Source IP", if c.ip.is_empty() { "not available".to_string() } else { c.ip.clone() }),
         ("Source hostname", ctx.source_host.clone().unwrap_or_else(|| "could not be resolved".into())),
         (
             "Client workstation (reported)",
@@ -236,12 +265,18 @@ pub fn alert_message(c: &Connection, host: &str, ctx: &AlertContext, cfg: &Confi
     if let Some(off) = outside_business_hours(cfg, c.time) {
         rows.push(("Outside business hours", if off { "Yes (outside business hours)" } else { "No" }.to_string()));
     }
+    if end {
+        let start = ctx.session_start;
+        rows.push(("Session start", start.map(local).unwrap_or_else(|| "unknown".into())));
+        rows.push(("Session end", when.clone()));
+        rows.push(("Duration", start.map(|s| duration_text(c.time - s)).unwrap_or_else(|| "unknown".into())));
+    }
     rows.extend([
         ("Date and time", when),
         ("Session ID", session),
         ("Windows event IDs", ids),
     ]);
-    let mut text = String::from("Remote Desktop connection detected\r\n----------------------------------------\r\n");
+    let mut text = format!("{title}\r\n----------------------------------------\r\n");
     for (k, v) in &rows {
         text.push_str(&format!("{:<18} {}\r\n", format!("{k}:"), v));
     }
@@ -253,7 +288,7 @@ pub fn alert_message(c: &Connection, host: &str, ctx: &AlertContext, cfg: &Confi
     text.push_str(&cooldown);
     text.push_str("\r\n");
 
-    let mut html = format!("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>{STYLE}</style></head><body><h2>Remote Desktop connection detected</h2><table>");
+    let mut html = format!("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>{STYLE}</style></head><body><h2>{title}</h2><table>");
     for (k, v) in &rows {
         html.push_str(&format!("<tr><th>{}</th><td>{}</td></tr>", k, html_escape(v)));
     }
@@ -713,6 +748,35 @@ mod tests {
         assert!(order.windows(2).all(|w| w[0] < w[1]), "rows follow Connection type");
         assert_eq!(decide(&x, &c, None), ST_QUEUED, "decision unchanged");
         assert_eq!(first_seen_text(&crate::db::FirstSeen::NewUser), "First connection by this user");
+    }
+
+    #[test]
+    fn disconnect_and_logoff_notifications() {
+        let mut c = cfg();
+        let t = Utc::now();
+        assert_eq!(decide(&conn(Signal::Disconnect, t), &c, None), ST_NA, "off by default, history only as before");
+        assert_eq!(decide(&conn(Signal::Logoff, t), &c, None), ST_NA);
+        c.notifications.notify_disconnects = true;
+        c.notifications.notify_logoffs = true;
+        assert_eq!(decide(&conn(Signal::Disconnect, t), &c, None), ST_QUEUED);
+        assert_eq!(decide(&conn(Signal::Logoff, t), &c, Some(t - Duration::minutes(3))), ST_COOLDOWN);
+        assert_eq!(decide(&conn(Signal::NewLogon, t), &c, None), ST_QUEUED, "logon alerts unchanged");
+        let mut d = conn(Signal::Disconnect, t);
+        d.session_id = Some(2);
+        let ctx = AlertContext { session_start: Some(t - Duration::minutes(72)), ..Default::default() };
+        let m = alert_message(&d, "PC01", &ctx, &c, false);
+        assert!(m.text.starts_with("Remote Desktop session ended"));
+        assert!(m.subject.starts_with("RDP Disconnection: jdoe from 203.0.113.10"));
+        assert!(m.text.contains("Duration:          1 h 12 min"), "{}", m.text);
+        assert!(m.text.contains("Session start:") && m.text.contains("Session end:"));
+        let mut l = conn(Signal::Logoff, t);
+        l.ip.clear();
+        let m = alert_message(&l, "PC01", &AlertContext::default(), &c, false);
+        assert!(m.text.contains("Duration:          unknown") && m.text.contains("Source IP:         not available"));
+        assert!(!alert_message(&conn(Signal::NewLogon, t), "PC01", &AlertContext::default(), &c, false).text.contains("Duration"));
+        assert_eq!(duration_text(Duration::seconds(30)), "less than 1 min");
+        assert_eq!(duration_text(Duration::minutes(45)), "45 min");
+        assert_eq!(duration_text(Duration::minutes(60 * 26 + 5)), "1 d 2 h 5 min");
     }
 
     #[test]

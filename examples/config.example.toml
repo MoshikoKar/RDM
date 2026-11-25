@@ -24,6 +24,8 @@ timeout_seconds = 30
 subject_format = "RDP ALERT: {user} from {ip} to {host}"   # {user} {domain} {ip} {host} {type} {time}
 notify_new_logons = true
 notify_reconnects = true
+notify_disconnects = false       # email when a session is disconnected, with its duration
+notify_logoffs = false           # email when a user logs off (Session Manager 23), with the session duration
 cooldown_minutes = 15            # per account (domain\user) + source IP; 0 = email every distinct connection
 max_queue = 500                  # undelivered emails kept; the oldest is dropped beyond this
 retry_hours = 72                 # stop retrying an email after this long

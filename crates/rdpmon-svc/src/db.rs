@@ -29,6 +29,7 @@ pub fn kind_name(k: Signal) -> &'static str {
         Signal::Disconnect => "disconnect",
         Signal::Auth => "auth",
         Signal::Failed => "failed",
+        Signal::Logoff => "logoff",
         Signal::ShareAccess => "share",
         Signal::ShareDenied => "share_denied",
     }
@@ -274,6 +275,29 @@ impl Db {
             Some(t) => FirstSeen::Seen(t),
             None => FirstSeen::NewPair,
         })
+    }
+
+    /// Start (and source IP) of the session that a disconnect / logoff at
+    /// `before` ends: the latest logon or reconnection of the user with the
+    /// same session ID, else (when `ip` is known) from the same IP.
+    pub fn session_start(&self, user: &str, session_id: Option<u32>, ip: &str, before: DateTime<Utc>) -> Result<Option<(DateTime<Utc>, String)>> {
+        const Q: &str = "SELECT event_time, source_ip FROM connections
+             WHERE username = ?1 COLLATE NOCASE AND kind IN ('logon','reconnect') AND event_time <= ?2";
+        let row = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?));
+        let mut found = None;
+        if let Some(s) = session_id {
+            found = self
+                .conn
+                .query_row(&format!("{Q} AND session_id = ?3 ORDER BY event_time DESC LIMIT 1"), params![user, ts(before), s], row)
+                .optional()?;
+        }
+        if found.is_none() && !ip.is_empty() {
+            found = self
+                .conn
+                .query_row(&format!("{Q} AND source_ip = ?3 ORDER BY event_time DESC LIMIT 1"), params![user, ts(before), ip], row)
+                .optional()?;
+        }
+        Ok(found.and_then(|(t, ip)| parse_ts(&t).map(|t| (t, ip))))
     }
 
     /// Failed logons in the period: (attempts, distinct source IPs).
@@ -644,6 +668,25 @@ mod tests {
         assert_eq!(db.first_seen("jdoe", "192.0.2.1").unwrap(), FirstSeen::NewIp);
         assert_eq!(db.first_seen("jdoe", "198.51.100.1").unwrap(), FirstSeen::NewPair);
         assert_eq!(db.first_seen("mallory", "203.0.113.10").unwrap(), FirstSeen::NewUser, "failed logons do not count");
+    }
+
+    #[test]
+    fn session_start_lookup() {
+        let mut db = Db::memory();
+        let t = Utc::now() - Duration::hours(2);
+        db.record_connection(&conn("jdoe", t), "PC01", "k", false, "n/a", None, 10).unwrap(); // session 2
+        let mut later = conn("jdoe", t + Duration::minutes(30));
+        later.session_id = Some(5);
+        later.ip = "198.51.100.1".into();
+        later.refs[0].record_id = 78;
+        db.record_connection(&later, "PC01", "k", false, "n/a", None, 10).unwrap();
+        let end = t + Duration::minutes(72);
+        let by_session = db.session_start("JDOE", Some(2), "", end).unwrap().unwrap();
+        assert_eq!((by_session.0, by_session.1.as_str()), (parse_ts(&ts(t)).unwrap(), "203.0.113.10"));
+        let by_ip = db.session_start("jdoe", None, "198.51.100.1", end).unwrap().unwrap();
+        assert_eq!(by_ip.0, parse_ts(&ts(t + Duration::minutes(30))).unwrap());
+        assert_eq!(db.session_start("jdoe", Some(9), "", end).unwrap(), None, "no matching start");
+        assert_eq!(db.session_start("jdoe", Some(2), "", t - Duration::minutes(1)).unwrap(), None, "start must be before the end");
     }
 
     #[test]
