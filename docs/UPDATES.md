@@ -7,38 +7,31 @@ an update never downloads or applies configuration.
 ## Publishing a release
 
 1. Set the new version in `Cargo.toml` (`[workspace.package] version`, semantic
-   versioning, e.g. `0.1.2`).
-2. Build and sign on a secured build machine:
+   versioning, e.g. `0.2.2`) and commit it to `main`.
+2. Tag and push:
 
    ```powershell
-   .\scripts\build.ps1 -Release -ReleaseKey D:\keys\release.key -CertThumbprint <code-signing cert>
+   git tag v0.2.2
+   git push origin v0.2.2
    ```
 
-   This produces `dist\RDPMonitor-0.1.2-x64.msi` and `dist\RDPMonitor-0.1.2-x64.msi.sig`.
-   (`-Release` fails without both keys; a build without them is named
-   `*-unsigned.msi`, which the update client never accepts.)
-   Check it: `rdpmon-tool verify-release --pub release.pub --file dist\RDPMonitor-0.1.2-x64.msi --version 0.1.2`
-3. Publish a release whose tag is the version (`v0.1.2` or `0.1.2`) with **both
-   files attached under exactly these names**.
+That's all. The **Release** workflow (`.github/workflows/release.yml`) checks
+that the tag matches `Cargo.toml`, runs the tests, builds the MSI, signs it with
+the `RELEASE_KEY` repository secret, checks the signature against the key built
+into the agents, and publishes the GitHub Release with
+`RDPMonitor-<version>-x64.msi` and `RDPMonitor-<version>-x64.msi.sig`. Agents
+install it at their next daily check.
 
-   GitHub:
-   ```powershell
-   gh release create v0.1.2 dist\RDPMonitor-0.1.2-x64.msi dist\RDPMonitor-0.1.2-x64.msi.sig --notes-file notes.md
-   ```
+One-time setup: the private key lives in the repository secret `RELEASE_KEY`
+(Settings > Secrets and variables > Actions). Its public half is
+`BUILTIN_UPDATE_SIGNING_KEY` in `crates/rdpmon-core/src/config.rs`. Keep an
+offline backup of the private key. Replacing it means shipping one release
+signed with the old key that contains the new built-in public key.
 
-   GitLab (generic package registry + release links), with `$P` = project ID and a token with `api` scope:
-   ```powershell
-   $h = @{ "PRIVATE-TOKEN" = $env:GITLAB_TOKEN }
-   $base = "https://gitlab.example.com/api/v4/projects/$P"
-   foreach ($f in "RDPMonitor-0.1.2-x64.msi", "RDPMonitor-0.1.2-x64.msi.sig") {
-     Invoke-RestMethod -Method Put -Headers $h -InFile "dist\$f" -Uri "$base/packages/generic/rdp-monitor/0.1.2/$f"
-   }
-   $links = "RDPMonitor-0.1.2-x64.msi", "RDPMonitor-0.1.2-x64.msi.sig" | ForEach-Object {
-     @{ name = $_; url = "$base/packages/generic/rdp-monitor/0.1.2/$_"; link_type = "package" } }
-   $body = @{ tag_name = "v0.1.2"; ref = "main"; description = (Get-Content notes.md -Raw); assets = @{ links = $links } } | ConvertTo-Json -Depth 5
-   Invoke-RestMethod -Method Post -Headers $h -ContentType "application/json" -Body $body -Uri "$base/releases"
-   ```
-   Asset links must point to the same GitLab server; links to other hosts are ignored.
+A local build can still be signed by hand:
+`.\scripts\build.ps1 -Release -ReleaseKey <path>\release.key [-CertThumbprint <cert>]`.
+A build without the release key is named `*-unsigned.msi`, and agents never
+install it.
 
 Drafts and pre-releases (GitHub *pre-release* flag, GitLab upcoming releases,
 or a semver pre-release tag like `1.2.0-rc.1`) are ignored unless
@@ -46,33 +39,44 @@ or a semver pre-release tag like `1.2.0-rc.1`) are ignored unless
 
 ## Configuring agents
 
-In the configuration utility (**Updates**) or in a package:
+Nothing needs to be configured. By default every agent uses the official
+repository and the built-in signing key, checks once a day at 03:00 local time,
+and installs a newer release by itself. To change this, use the configuration
+utility (**Updates**) or a package:
 
 ```toml
 [updates]
-provider = "github"                       # or "gitlab"
-repository_url = "https://github.com/acme/rdp-monitor"   # GitLab: https://gitlab.example.com/group/project
+provider = "github"                       # "none" disables updates; or "gitlab"
+repository_url = "https://github.com/MoshikoKar/RDM"
 token = ""                                # private repositories only, read-only
-signing_public_key = "<contents of release.pub>"
+signing_public_key = ""                   # empty = built-in key; set only for your own release key
+auto_install = true                       # false = check/install only from the utility
+check_time = "03:00"
 ```
+
+Agents upgraded from 0.2.0 or older that never had an update source set up
+get these defaults automatically. A source that was set up explicitly is kept.
 
 GitHub Enterprise Server URLs (`https://ghe.example.com/owner/repo`) use
 `/api/v3` automatically. Self-hosted GitLab works with any host name and port.
 
 ## Installing from the configuration utility
 
-**Updates > Check for updates** contacts the configured repository (never
-automatically), lists the newest eligible version and its release notes.
-**Download and install**:
+Every day at `check_time` (and right after the service starts, if that day's
+check was missed) the agent asks the repository for the newest eligible
+version. With `auto_install` it installs it right away. **Updates > Check for
+updates** does the same on demand and shows the release notes. Installing
+(automatic or **Download and install**):
 
 1. Re-reads the release list and confirms the version is newer than the
    installed one (no downgrades).
 2. Downloads the `.sig` and the MSI into `C:\ProgramData\RDP Monitor\updates`
    (SYSTEM-only write access), hashing while downloading.
-3. Verifies the signature with `signing_public_key` for that exact file name,
+3. Verifies the signature with the update signing key for that exact file name,
    version and SHA-256. Anything else is deleted and rejected.
 4. Starts `msiexec /i <msi> /qn /norestart /l*v updates\install-<version>.log`.
-   Windows Installer stops the service, replaces the files and starts the new
+   Running copies of the configuration utility are closed first. Windows
+   Installer stops the service, replaces the files and starts the new
    version (normally within a minute or two). Monitoring resumes from the
    event-log bookmarks, so no connection is lost.
 5. The new service records *update installed* (or *update not installed*, with
@@ -80,9 +84,11 @@ automatically), lists the newest eligible version and its release notes.
 
 ## Trust model
 
-- Trust comes only from the offline Ed25519 signature. A compromised repository,
-  stolen repository token or TLS interception cannot produce an MSI the agent
-  accepts without `release.key`.
+- Trust comes only from the Ed25519 signature. Replaced release files, a stolen
+  read token or TLS interception cannot produce an MSI the agent accepts without
+  the release key. The key is stored as a GitHub Actions secret, so anyone who
+  can change the repository's workflows can still get a release signed. Protect
+  the GitHub account (2FA) and limit who has write access.
 - The signature covers the file name, version and hash, so a valid signature
   for an old version cannot be presented as a newer one.
 - Authenticode-signing the MSI (`-CertThumbprint`) is recommended in addition,

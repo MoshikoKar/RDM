@@ -1,0 +1,61 @@
+name: Release
+
+# Push a tag like v0.2.1 (matching the version in Cargo.toml): this builds the
+# MSI, signs it with the RELEASE_KEY secret and publishes a GitHub Release
+# that installed agents pick up in their daily update check.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (stable, MSVC)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $v = ([regex]'(?m)^version\s*=\s*"([^"]+)"').Match((Get-Content Cargo.toml -Raw)).Groups[1].Value
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match Cargo.toml version $v" }
+          "VERSION=$v" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Build and sign
+        shell: pwsh
+        env:
+          RELEASE_KEY: ${{ secrets.RELEASE_KEY }}
+        run: .\scripts\build.ps1 -Release -ReleaseKeyEnv RELEASE_KEY
+
+      # The signature must verify with the key built into the agents,
+      # otherwise no agent would install this release.
+      - name: Verify against the built-in key
+        shell: pwsh
+        run: |
+          $pub = ([regex]'BUILTIN_UPDATE_SIGNING_KEY: &str = "([^"]+)"').Match((Get-Content crates\rdpmon-core\src\config.rs -Raw)).Groups[1].Value
+          if (-not $pub) { throw "built-in key not found" }
+          Set-Content -Path builtin.pub -Value $pub -Encoding ascii
+          .\dist\rdpmon-tool.exe verify-release --pub builtin.pub --file "dist\RDPMonitor-$env:VERSION-x64.msi" --version $env:VERSION
+          if ($LASTEXITCODE) { throw "signature does not verify with the built-in key" }
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $m = "dist\RDPMonitor-$env:VERSION-x64.msi"
+          gh release create "${{ github.ref_name }}" $m "$m.sig" dist\rdpmon-tool.exe --title "RDP Monitor $env:VERSION" --generate-notes --verify-tag
+          if ($LASTEXITCODE) { throw "gh release create failed" }

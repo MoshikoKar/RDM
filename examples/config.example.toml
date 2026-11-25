@@ -77,8 +77,10 @@ harden_service = true            # Administrators cannot stop/reconfigure/delete
 # trusted_config_key and last_package_serial are managed by the agent.
 
 [updates]
-provider = "none"                # "none" | "github" | "gitlab"
-repository_url = ""              # https://github.com/<owner>/<repo> or https://gitlab.example.com/<group>/<project>
+provider = "github"              # "none" | "github" | "gitlab"
+repository_url = "https://github.com/MoshikoKar/RDM"   # or https://gitlab.example.com/<group>/<project>
 token = ""                       # secret; only for private repositories (read-only scope)
-signing_public_key = ""          # base64 Ed25519 key from `rdpmon-tool keygen release`
+signing_public_key = ""          # empty = built-in key of the official releases; or a key from `rdpmon-tool keygen release`
 allow_prerelease = false
+auto_install = true              # check daily and install newer signed releases
+check_time = "03:00"             # local time of the daily check

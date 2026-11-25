@@ -1,11 +1,15 @@
-//! Application updates from GitHub / GitLab Releases. Network access happens
-//! only when an authorized administrator clicks Check / Install.
+//! Application updates from GitHub / GitLab Releases: checked once a day (and
+//! installed when `auto_install` is on) or when an administrator clicks
+//! Check / Install.
 //!
-//! Trust comes from an offline Ed25519 signature (`.msi.sig`) verified with
-//! the configured update signing key - not from the hosting provider, TLS or
-//! a checksum published next to the file.
+//! Trust comes from an Ed25519 signature (`.msi.sig`) verified with the
+//! update signing key (the built-in key of the official releases unless
+//! another is configured) - not from the hosting provider, TLS or a checksum
+//! published next to the file.
 
 use crate::app::Shared;
+use chrono::Local;
+use std::sync::Arc;
 use crate::db::Db;
 use crate::delivery::KV_UPDATE_PENDING;
 use crate::{logging, winhttp};
@@ -62,10 +66,13 @@ struct Source {
 }
 
 fn source(u: &UpdateConfig) -> Result<Source, String> {
+    if u.provider == UpdateProvider::None {
+        return Err("No update source is configured. Set it in the Updates section.".into());
+    }
     let (host, path) = repo_host_and_path(&u.repository_url).ok_or("The update repository URL is not valid.")?;
     let token = u.token.trim();
     match u.provider {
-        UpdateProvider::None => Err("No update source is configured. Set it in the Updates section.".into()),
+        UpdateProvider::None => unreachable!(),
         UpdateProvider::Github => {
             let mut parts = path.split('/');
             let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next()) else {
@@ -271,9 +278,9 @@ pub fn install(sh: &Shared, db: &Db, version: &str) -> Result<String, String> {
     if target <= cur {
         return Err(format!("Version {target} is not newer than the installed version {cur}; downgrades are not allowed."));
     }
-    if cfg.updates.signing_public_key.is_empty() {
-        return Err("No trusted update signing key is configured.".into());
-    }
+    // One installation at a time (daily auto-update vs. an administrator).
+    static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _busy = INSTALLING.try_lock().map_err(|_| "An update is already being installed.".to_string())?;
     let src = source(&cfg.updates)?;
     let rel = list(&src)?
         .into_iter()
@@ -308,7 +315,7 @@ pub fn install(sh: &Shared, db: &Db, version: &str) -> Result<String, String> {
     hf.f.sync_all().ok();
     let sha = rdpmon_core::crypto::hex(&hf.h.finalize());
     drop(hf.f);
-    if let Err(e) = r.and_then(|_| release::verify(&sig, &name, &target.to_string(), &sha, &cfg.updates.signing_public_key)) {
+    if let Err(e) = r.and_then(|_| release::verify(&sig, &name, &target.to_string(), &sha, cfg.updates.effective_signing_key())) {
         let _ = std::fs::remove_file(&part);
         return Err(format!("Update rejected: {e}"));
     }
@@ -329,10 +336,85 @@ pub fn install(sh: &Shared, db: &Db, version: &str) -> Result<String, String> {
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("cannot start Windows Installer: {e}"))?;
+    close_config_utility();
     logging::info(&format!("update {target} verified; msiexec started (log: {})", log.display()));
     Ok(format!(
         "Version {target} was downloaded and its signature verified. Installation has started; the service restarts automatically in a minute or two. Settings and history are preserved."
     ))
+}
+
+/// Ends running copies of the configuration utility so the installer can
+/// replace it. Delayed so an administrator who started the update still
+/// receives the reply; the installer itself needs longer than that to start.
+fn close_config_utility() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let taskkill = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into())).join("System32\\taskkill.exe");
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new(taskkill).args(["/F", "/IM", "rdpmon-config.exe"]).creation_flags(0x0800_0000).output();
+    });
+}
+
+const KV_UPDATE_SLOT: &str = "update_last_slot";
+
+/// Daily update worker: at `check_time` it looks for a newer signed release
+/// and, with `auto_install`, installs it (the installer stops this service,
+/// replaces the program and starts the new version).
+pub fn run(shared: Arc<Shared>) {
+    // Let the service settle (and a just-finished update report itself) first.
+    if crate::winsec::wait_any(&[shared.stop.0], 5 * 60 * 1000).is_some() {
+        return;
+    }
+    while !shared.stopping() {
+        let cfg = shared.cfg();
+        let u = &cfg.updates;
+        if u.auto_install && u.provider != UpdateProvider::None {
+            if let Some(slot) = crate::notify::last_daily_slot(&u.check_time, Local::now()) {
+                let slot_s = slot.to_rfc3339();
+                match shared.open_db() {
+                    Ok(db) if db.kv(KV_UPDATE_SLOT).ok().flatten().as_deref() != Some(slot_s.as_str()) => {
+                        let _ = db.set_kv(KV_UPDATE_SLOT, &slot_s);
+                        auto_update(&shared, &db, &cfg);
+                    }
+                    Ok(_) => {}
+                    Err(e) => logging::warn(&format!("update check skipped: {e}")),
+                }
+            }
+        }
+        // Re-read the settings at least hourly.
+        let next = crate::notify::next_daily_slot(&u.check_time, Local::now())
+            .map(|t| (t - Local::now()).to_std().unwrap_or_default())
+            .unwrap_or(std::time::Duration::from_secs(3600))
+            .min(std::time::Duration::from_secs(3600))
+            .max(std::time::Duration::from_secs(1));
+        if crate::winsec::wait_any(&[shared.stop.0], next.as_millis() as u32).is_some() {
+            break;
+        }
+    }
+    logging::info("update worker stopped");
+}
+
+fn auto_update(shared: &Shared, db: &Db, cfg: &Config) {
+    let info = match check(cfg) {
+        Ok(i) => i,
+        Err(e) => {
+            logging::warn(&format!("daily update check failed: {e}"));
+            let _ = db.audit("update", "update check failed", &e);
+            return;
+        }
+    };
+    let Some(v) = info.latest_version.filter(|_| info.update_available) else {
+        logging::info("daily update check: up to date");
+        return;
+    };
+    let _ = db.audit("update", "automatic update", &format!("installing version {v}"));
+    match install(shared, db, &v) {
+        Ok(m) => logging::info(&m),
+        Err(e) => {
+            logging::warn(&format!("automatic update to {v} failed: {e}"));
+            let _ = db.audit("update", "update rejected", &e);
+        }
+    }
 }
 
 #[cfg(test)]
