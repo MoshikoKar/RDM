@@ -65,7 +65,16 @@ Events for the same account and source IP within 30 s are merged into one connec
 `corp.local` are the same domain). If the events of one session report different
 addresses (RD Gateway or NAT in front of the host, IPv4 and IPv6 of one client),
 they are still merged unless their session or logon IDs differ; the 4624 address
-is then the Source IP and the others are listed as "Other addresses seen". Only
+is then the Source IP and the others are listed as "Other addresses seen". The
+alert also shows the name the client reports for itself (4624 WorkstationName /
+4778 ClientName) as "Client workstation (reported)"; any client can send any
+name, so it is shown for information only and never used for filtering.
+Context rows help judge a connection at a glance (they never change whether or
+how it is reported): *Source network* (Internal for private, CGNAT, link-local
+and ULA ranges plus `internal_networks`, otherwise External), *First seen*
+(first connection by this user / from this IP / of this pair, or the last time
+seen - limited by `history_days`), and *Outside business hours* when
+`business_hours` is set. Only
 RDP-specific events are selected (non-RDP logons such as network or service
 logons never reach the agent); built-in identities (`NT AUTHORITY`,
 `Window Manager`, `Font Driver Host`) and console (`LOCAL`) sessions are ignored.
@@ -82,6 +91,14 @@ Undelivered emails are queued in SQLite and retried with exponential backoff
 > `auditpol /set /subcategory:"Other Logon/Logoff Events" /success:enable`
 
 ### Optional alerts (all off by default)
+
+**Disconnections and logoffs** (`notify_disconnects`, `notify_logoffs`): an
+email when a session is disconnected (4779 / LSM 24) or the user logs off
+(LSM 23, subscribed only when enabled), with session start, end and duration.
+The start is the user's latest logon or reconnection with the same session ID
+(or from the same IP); "unknown" when there is none, e.g. a session that began
+before the agent was installed, or a local console session. These have their own
+quiet period and never affect logon alerts.
 
 **Failed logons** (`[failed_logons]`): subscribes to Security 4625 with
 LogonType 3 or 10. With NLA (the default) a wrong RDP password is logged as a

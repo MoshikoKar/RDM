@@ -73,7 +73,8 @@ fn channel_queries_aged(c: &Config, age_ms: u64) -> Vec<(&'static str, Vec<Strin
         v.push((CH_SECURITY, security));
     }
     if m.session_manager_log {
-        v.push((CH_LSM, vec![format!("*[System[(EventID=21 or EventID=24 or EventID=25) and {age}]]")]));
+        let logoff = if c.notifications.notify_logoffs { " or EventID=23" } else { "" };
+        v.push((CH_LSM, vec![format!("*[System[(EventID=21 or EventID=24 or EventID=25{logoff}) and {age}]]")]));
     }
     if m.auth_log {
         v.push((CH_RCM, vec![format!("*[System[(EventID=1149) and {age}]]")]));
@@ -280,12 +281,11 @@ fn drain_channel(shared: &Shared, db: &mut Db, corr: &mut Correlator, failed: &m
                             if db.is_processed(&o.channel, o.record_id, o.time).unwrap_or(false) {
                                 continue;
                             }
-                            if o.signal == Signal::Failed {
-                                handle_failed(shared, db, failed, o);
-                            } else if o.signal.is_standalone() {
-                                handle_share(shared, db, o);
-                            } else {
-                                corr.push(o, Instant::now());
+                            match o.signal {
+                                Signal::Failed => handle_failed(shared, db, failed, o),
+                                Signal::Logoff => handle_logoff(shared, db, o),
+                                s if s.is_standalone() => handle_share(shared, db, o),
+                                _ => corr.push(o, Instant::now()),
                             }
                         }
                         Err(Skip::Irrelevant) => {}
@@ -318,13 +318,40 @@ fn publish_status(shared: &Shared, channels: &[Channel]) {
 fn handle_connection(shared: &Shared, db: &mut Db, cfg: &Config, c: &Connection) {
     // Connections that happened while the service was not running.
     let recovered = c.time < shared.started - chrono::Duration::seconds(5);
-    let last = db.cooldown_last(&c.key(&shared.host)).ok().flatten();
+    let end = notify::is_session_end(c.kind);
+    // Session ends have their own cooldown so they never suppress, or are
+    // suppressed by, logon alerts.
+    let key = if end { format!("end|{}", c.key(&shared.host)) } else { c.key(&shared.host) };
+    let last = db.cooldown_last(&key).ok().flatten();
     let status = notify::decide(c, cfg, last);
     let msg = (status == notify::ST_QUEUED).then(|| {
-        let source_host = crate::resolve::hostname(&c.ip, crate::resolve::TIMEOUT);
-        notify::alert_message(c, &shared.host, source_host.as_deref(), cfg, recovered)
+        let ctx = notify::AlertContext {
+            source_host: crate::resolve::hostname(&c.ip, crate::resolve::TIMEOUT),
+            // Before this connection is recorded.
+            first_seen: (!end).then(|| db.first_seen(&c.user, &c.ip).ok().map(|f| notify::first_seen_text(&f))).flatten(),
+            session_start: end.then(|| db.session_start(&c.user, c.session_id, &c.ip, c.time).ok().flatten().map(|s| s.0)).flatten(),
+        };
+        notify::alert_message(c, &shared.host, &ctx, cfg, recovered)
     });
-    record(shared, db, cfg, c, &c.key(&shared.host), recovered, status, msg);
+    record(shared, db, cfg, c, &key, recovered, status, msg);
+}
+
+/// LSM 23 has no address: take it from the session it ends.
+fn handle_logoff(shared: &Shared, db: &mut Db, o: Observation) {
+    let cfg = shared.cfg();
+    let ip = db.session_start(&o.user, o.session_id, "", o.time).ok().flatten().map(|s| s.1).unwrap_or_default();
+    let c = Connection {
+        kind: Signal::Logoff,
+        time: o.time,
+        refs: vec![EventRef { channel: o.channel, record_id: o.record_id, time: o.time }],
+        event_ids: vec![o.event_id],
+        session_id: o.session_id,
+        user: o.user,
+        domain: o.domain,
+        ip,
+        ..Default::default()
+    };
+    handle_connection(shared, db, &cfg, &c);
 }
 
 /// One failed logon: counted per source IP, always recorded in history,
@@ -435,6 +462,7 @@ mod tests {
         let mut all = Config::default();
         all.failed_logons.enabled = true;
         all.smb.enabled = true;
+        all.notifications.notify_logoffs = true;
         let mut failed_only = all.clone();
         failed_only.smb.notify_success = false;
         let selects: Vec<_> = channel_queries(&all).into_iter().chain(channel_queries(&failed_only)).collect();

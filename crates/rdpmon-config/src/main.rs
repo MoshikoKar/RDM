@@ -140,6 +140,8 @@ fn fill_config(ui: &AppWindow, c: &Config, has_pw: bool, has_tok: bool) {
     ui.set_subject_format(n.subject_format.clone().into());
     ui.set_notify_new(n.notify_new_logons);
     ui.set_notify_reconnect(n.notify_reconnects);
+    ui.set_notify_disconnect(n.notify_disconnects);
+    ui.set_notify_logoff(n.notify_logoffs);
     ui.set_cooldown(n.cooldown_minutes.to_string().into());
     let m = &c.monitoring;
     ui.set_security_log(m.security_log);
@@ -209,6 +211,8 @@ fn read_config(ui: &AppWindow) -> Result<(Config, Option<String>, Option<String>
     c.notifications.subject_format = ui.get_subject_format().trim().to_string();
     c.notifications.notify_new_logons = ui.get_notify_new();
     c.notifications.notify_reconnects = ui.get_notify_reconnect();
+    c.notifications.notify_disconnects = ui.get_notify_disconnect();
+    c.notifications.notify_logoffs = ui.get_notify_logoff();
     c.notifications.cooldown_minutes = parse_num(&ui.get_cooldown(), "Quiet period")?;
     c.monitoring.security_log = ui.get_security_log();
     c.monitoring.session_manager_log = ui.get_lsm_log();

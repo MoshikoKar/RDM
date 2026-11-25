@@ -96,6 +96,8 @@ export component AppWindow inherits Window {
     // monitoring
     in-out property <bool> notify-new: true;
     in-out property <bool> notify-reconnect: true;
+    in-out property <bool> notify-disconnect: false;
+    in-out property <bool> notify-logoff: false;
     in-out property <string> cooldown: "15";
     in-out property <bool> security-log: true;
     in-out property <bool> lsm-log: true;
@@ -741,6 +743,14 @@ export component AppWindow inherits Window {
                             CheckBox {
                                 text: "Email about reconnections";
                                 checked <=> root.notify-reconnect;
+                            }
+                            CheckBox {
+                                text: "Email when a session is disconnected (with session duration)";
+                                checked <=> root.notify-disconnect;
+                            }
+                            CheckBox {
+                                text: "Email when a user logs off (Session Manager 23, with session duration)";
+                                checked <=> root.notify-logoff;
                             }
                             Row {
                                 label: "Quiet period (minutes)";

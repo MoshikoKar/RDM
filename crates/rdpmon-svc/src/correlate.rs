@@ -42,6 +42,8 @@ pub struct Connection {
     pub ip: String,
     /// Other source addresses reported by events of the same session.
     pub other_ips: Vec<String>,
+    /// Name the client reported for itself (spoofable; display only).
+    pub client_name: String,
     pub session_id: Option<u32>,
     pub event_ids: Vec<u32>,
     pub refs: Vec<EventRef>,
@@ -249,11 +251,12 @@ impl Correlator {
         other_ips.dedup();
         let domain = obs.iter().map(|o| o.domain.clone()).find(|d| !d.is_empty()).unwrap_or_default();
         let session_id = obs.iter().find_map(|o| o.session_id);
+        let client_name = obs.iter().map(|o| o.client_name.clone()).find(|n| !n.is_empty()).unwrap_or_default();
         let mut event_ids: Vec<u32> = obs.iter().map(|o| o.event_id).collect();
         event_ids.sort_unstable();
         event_ids.dedup();
         let refs = obs.iter().map(|o| EventRef { channel: o.channel.clone(), record_id: o.record_id, time: o.time }).collect();
-        Connection { kind, time: primary.time, user: primary.user, domain, ip, other_ips, session_id, event_ids, refs, ..Default::default() }
+        Connection { kind, time: primary.time, user: primary.user, domain, ip, other_ips, client_name, session_id, event_ids, refs, ..Default::default() }
     }
 }
 
@@ -287,6 +290,17 @@ mod tests {
         assert_eq!(x.domain, "CORP");
         assert_eq!(x.refs.len(), 3);
         assert!(c.is_idle());
+    }
+
+    #[test]
+    fn group_takes_first_reported_client_name() {
+        let mut c = Correlator::new(30, "PC01");
+        let now = Instant::now();
+        c.push(obs(lsm(21, 1, T0, r"CORP\jdoe", "203.0.113.10", 3)), now);
+        c.push(obs(logon4624(2, T1, "jdoe", "203.0.113.10", "10")), now);
+        assert_eq!(c.flush_all(now)[0].client_name, "LAPTOP7");
+        c.push(obs(lsm(21, 3, T0, r"CORP\jdoe", "203.0.113.10", 3)), now);
+        assert_eq!(c.flush_all(now)[0].client_name, "", "not reported");
     }
 
     #[test]
