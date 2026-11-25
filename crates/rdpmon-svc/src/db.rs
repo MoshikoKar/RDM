@@ -177,7 +177,7 @@ impl Db {
         if let Some(m) = message {
             tx.execute(
                 "INSERT INTO cooldown (key, last_time) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET last_time=excluded.last_time",
-                params![c.key(), ts(c.time)],
+                params![c.key(hostname), ts(c.time)],
             )?;
             dropped = enqueue_tx(&tx, "alert", &format!("conn:{conn_id}"), Some(conn_id), &m, max_queue)?;
         }
@@ -447,12 +447,27 @@ mod tests {
         db.record_connection(&c, "PC01", false, "queued", Some(msg()), 100).unwrap();
         assert!(db.is_processed("Security", 77, t).unwrap());
         assert!(!db.is_processed("Security", 77, t + Duration::seconds(1)).unwrap(), "cleared log reusing ids is not a duplicate");
-        assert_eq!(db.cooldown_last(&c.key()).unwrap().map(ts), Some(ts(t)));
+        assert_eq!(db.cooldown_last(&c.key("PC01")).unwrap().map(ts), Some(ts(t)));
         assert_eq!(db.outbox_counts().unwrap(), (1, 0));
         db.record_connection(&conn("asmith", t), "PC01", false, "cooldown", None, 100).unwrap();
         assert_eq!(db.outbox_counts().unwrap(), (1, 0));
         assert_eq!(db.recent_history(10).unwrap().len(), 2);
         assert_eq!(db.connections_between(t - Duration::hours(1), t + Duration::hours(1)).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn cooldown_is_keyed_per_domain() {
+        let mut db = Db::memory();
+        let t = Utc::now();
+        let corp = conn("admin", t);
+        let mut local = conn("admin", t);
+        local.domain = "PC01".into();
+        db.record_connection(&corp, "PC01", false, "queued", Some(msg()), 100).unwrap();
+        assert!(db.cooldown_last(&corp.key("PC01")).unwrap().is_some());
+        assert!(db.cooldown_last(&local.key("PC01")).unwrap().is_none(), "local account is not in cooldown");
+        let mut fqdn = conn("Admin", t);
+        fqdn.domain = "corp.local".into();
+        assert!(db.cooldown_last(&fqdn.key("PC01")).unwrap().is_some(), "same account, other domain form");
     }
 
     #[test]

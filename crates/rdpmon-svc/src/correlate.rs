@@ -4,15 +4,16 @@
 //! A new RDP logon typically produces 1149 (auth) + 4624/10 + LSM 21; a
 //! reconnection produces 1149 + 4778 + LSM 25 (+ sometimes 4624/10). These
 //! arrive on different channels, in no guaranteed order. Observations with the
-//! same user + source IP, within the correlation window, of the same class
-//! (establish / disconnect) and not repeating an event type already in the
-//! group are merged. A group is finalized once no new related event has
+//! same user + source IP and a compatible domain (see
+//! `events::domains_compatible`), within the correlation window, of the same
+//! class (establish / disconnect) and not repeating an event type already in
+//! the group are merged. A group is finalized once no new related event has
 //! arrived for `settle`, or after `max_hold` at the latest.
 //!
 //! 1149 alone never produces a connection: authentication is not proof that a
 //! session was established. It is only attached as supporting evidence.
 
-use crate::events::{Observation, Signal};
+use crate::events::{domains_compatible, normalize_domain, Observation, Signal};
 use chrono::{DateTime, Utc};
 use std::time::{Duration, Instant};
 
@@ -37,20 +38,26 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn key(&self) -> String {
-        format!("{}|{}", self.user.to_lowercase(), self.ip)
+    /// Cooldown key: normalized domain + user + source IP, so two different
+    /// accounts with the same user name never suppress each other.
+    pub fn key(&self, host: &str) -> String {
+        format!("{}|{}|{}", normalize_domain(&self.domain, host), self.user.to_lowercase(), self.ip)
     }
 }
 
 struct Group {
     disconnect: bool,
     key: String,
+    /// Normalized domain of the group ("" until an event reports one).
+    domain: String,
     obs: Vec<Observation>,
     first_arrival: Instant,
     last_arrival: Instant,
 }
 
 pub struct Correlator {
+    /// Local computer name, for domain normalization.
+    host: String,
     window: chrono::Duration,
     settle: Duration,
     max_hold: Duration,
@@ -59,8 +66,9 @@ pub struct Correlator {
 }
 
 impl Correlator {
-    pub fn new(window_secs: u32) -> Self {
+    pub fn new(window_secs: u32, host: &str) -> Self {
         Self {
+            host: host.to_string(),
             window: chrono::Duration::seconds(window_secs as i64),
             settle: Duration::from_secs(4),
             max_hold: Duration::from_secs(20),
@@ -88,19 +96,24 @@ impl Correlator {
         }
         let disconnect = o.signal == Signal::Disconnect;
         let key = o.key();
+        let domain = normalize_domain(&o.domain, &self.host);
         let window = self.window;
         let found = self.groups.iter_mut().find(|g| {
             g.disconnect == disconnect
                 && g.key == key
+                && domains_compatible(&g.domain, &domain)
                 && !g.obs.iter().any(|x| x.channel == o.channel && x.event_id == o.event_id)
                 && g.obs.iter().any(|x| (x.time - o.time).abs() <= window)
         });
         match found {
             Some(g) => {
+                if g.domain.is_empty() {
+                    g.domain = domain;
+                }
                 g.obs.push(o);
                 g.last_arrival = now;
             }
-            None => self.groups.push(Group { disconnect, key, obs: vec![o], first_arrival: now, last_arrival: now }),
+            None => self.groups.push(Group { disconnect, key, domain, obs: vec![o], first_arrival: now, last_arrival: now }),
         }
     }
 
@@ -145,7 +158,10 @@ impl Correlator {
             let mut i = 0;
             while i < self.auths.len() {
                 let a = &self.auths[i].0;
-                if a.key() == g.key && (a.time - first).abs() <= window {
+                if a.key() == g.key
+                    && domains_compatible(&g.domain, &normalize_domain(&a.domain, &self.host))
+                    && (a.time - first).abs() <= window
+                {
                     obs.push(self.auths.swap_remove(i).0);
                 } else {
                     i += 1;
@@ -191,7 +207,7 @@ mod tests {
 
     #[test]
     fn new_logon_events_merge_into_one_connection() {
-        let mut c = Correlator::new(30);
+        let mut c = Correlator::new(30, "PC01");
         let now = Instant::now();
         c.push(obs(rcm1149(1, T0, "jdoe", "203.0.113.10")), now);
         c.push(obs(logon4624(2, T1, "jdoe", "203.0.113.10", "10")), now);
@@ -210,7 +226,7 @@ mod tests {
 
     #[test]
     fn reconnect_wins_over_logon_in_same_group() {
-        let mut c = Correlator::new(30);
+        let mut c = Correlator::new(30, "PC01");
         let now = Instant::now();
         c.push(obs(lsm(25, 9, T0, r"CORP\jdoe", "198.51.100.25", 4)), now);
         c.push(obs(logon4624(2, T1, "jdoe", "198.51.100.25", "10")), now);
@@ -222,7 +238,7 @@ mod tests {
 
     #[test]
     fn authentication_alone_is_not_a_connection() {
-        let mut c = Correlator::new(30);
+        let mut c = Correlator::new(30, "PC01");
         let now = Instant::now();
         c.push(obs(rcm1149(1, T0, "jdoe", "203.0.113.10")), now);
         assert!(c.flush_all(now + Duration::from_secs(120)).is_empty());
@@ -230,7 +246,7 @@ mod tests {
 
     #[test]
     fn different_users_or_ips_are_separate() {
-        let mut c = Correlator::new(30);
+        let mut c = Correlator::new(30, "PC01");
         let now = Instant::now();
         c.push(obs(logon4624(1, T0, "jdoe", "203.0.113.10", "10")), now);
         c.push(obs(logon4624(2, T0, "asmith", "203.0.113.10", "10")), now);
@@ -239,8 +255,54 @@ mod tests {
     }
 
     #[test]
+    fn same_user_name_in_different_domains_is_separate() {
+        let mut c = Correlator::new(30, "PC01");
+        let now = Instant::now();
+        c.push(obs(lsm(21, 1, T0, r"CORP\admin", "203.0.113.10", 2)), now);
+        c.push(obs(lsm(21, 2, T1, r"PC01\admin", "203.0.113.10", 3)), now);
+        let out = c.flush_all(now);
+        assert_eq!(out.len(), 2);
+        assert_ne!(out[0].key("PC01"), out[1].key("PC01"), "separate cooldown keys");
+    }
+
+    #[test]
+    fn fqdn_and_netbios_domain_merge() {
+        let mut c = Correlator::new(30, "PC01");
+        let now = Instant::now();
+        let mut fqdn = obs(logon4624(1, T0, "jdoe", "203.0.113.10", "10"));
+        fqdn.domain = "corp.local".into();
+        c.push(fqdn, now);
+        c.push(obs(lsm(21, 2, T1, r"CORP\jdoe", "203.0.113.10", 3)), now);
+        assert_eq!(c.flush_all(now).len(), 1);
+    }
+
+    #[test]
+    fn empty_domain_merges_with_the_session() {
+        let mut c = Correlator::new(30, "PC01");
+        let now = Instant::now();
+        let mut nodomain = obs(logon4624(1, T0, "jdoe", "203.0.113.10", "10"));
+        nodomain.domain.clear();
+        c.push(nodomain, now);
+        c.push(obs(lsm(21, 2, T1, r"CORP\jdoe", "203.0.113.10", 3)), now);
+        let out = c.flush_all(now);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].domain, "CORP");
+    }
+
+    #[test]
+    fn local_dot_domain_matches_computer_name() {
+        let mut c = Correlator::new(30, "PC01");
+        let now = Instant::now();
+        let mut dot = obs(logon4624(1, T0, "admin", "203.0.113.10", "10"));
+        dot.domain = ".".into();
+        c.push(dot, now);
+        c.push(obs(lsm(21, 2, T1, r"PC01\admin", "203.0.113.10", 3)), now);
+        assert_eq!(c.flush_all(now).len(), 1);
+    }
+
+    #[test]
     fn repeated_event_type_starts_a_new_connection() {
-        let mut c = Correlator::new(30);
+        let mut c = Correlator::new(30, "PC01");
         let now = Instant::now();
         c.push(obs(session4778(4778, 1, T0, "jdoe", "203.0.113.10")), now);
         c.push(obs(session4778(4778, 2, T2, "jdoe", "203.0.113.10")), now);
@@ -249,7 +311,7 @@ mod tests {
 
     #[test]
     fn same_record_read_twice_is_ignored() {
-        let mut c = Correlator::new(30);
+        let mut c = Correlator::new(30, "PC01");
         let now = Instant::now();
         c.push(obs(logon4624(1, T0, "jdoe", "203.0.113.10", "10")), now);
         c.push(obs(logon4624(1, T0, "jdoe", "203.0.113.10", "10")), now);
@@ -260,7 +322,7 @@ mod tests {
 
     #[test]
     fn events_outside_window_are_separate() {
-        let mut c = Correlator::new(30);
+        let mut c = Correlator::new(30, "PC01");
         let now = Instant::now();
         c.push(obs(logon4624(1, T0, "jdoe", "203.0.113.10", "10")), now);
         c.push(obs(lsm(21, 2, "2026-11-24T09:05:00Z", r"CORP\jdoe", "203.0.113.10", 3)), now);
@@ -269,7 +331,7 @@ mod tests {
 
     #[test]
     fn disconnects_are_grouped_separately() {
-        let mut c = Correlator::new(30);
+        let mut c = Correlator::new(30, "PC01");
         let now = Instant::now();
         c.push(obs(session4778(4779, 1, T0, "jdoe", "203.0.113.10")), now);
         c.push(obs(lsm(24, 2, T1, r"CORP\jdoe", "203.0.113.10", 3)), now);
@@ -281,7 +343,7 @@ mod tests {
 
     #[test]
     fn max_hold_bounds_latency() {
-        let mut c = Correlator::new(30);
+        let mut c = Correlator::new(30, "PC01");
         let start = Instant::now();
         c.push(obs(logon4624(1, T0, "jdoe", "203.0.113.10", "10")), start);
         assert!(c.next_deadline().unwrap() <= start + Duration::from_secs(4));

@@ -33,9 +33,30 @@ pub struct Observation {
 
 impl Observation {
     /// Correlation key: lower-case user name (without domain) + source IP.
+    /// The domain is compared separately (see `domains_compatible`) because
+    /// not every event reports it, or reports it in the same form.
     pub fn key(&self) -> String {
         format!("{}|{}", self.user.to_lowercase(), self.ip)
     }
+}
+
+/// Canonical form of an account domain so the forms used by different events
+/// compare equal: upper case, first label of an FQDN (`corp.local` -> `CORP`),
+/// and `.` (local machine) mapped to the local computer name. Empty stays
+/// empty (the event did not report a domain).
+pub fn normalize_domain(domain: &str, host: &str) -> String {
+    let d = domain.trim();
+    if d.is_empty() {
+        return String::new();
+    }
+    let d = if d == "." { host } else { d };
+    d.split('.').next().unwrap_or("").to_ascii_uppercase()
+}
+
+/// Two normalized domains may belong to the same account unless both are
+/// known and differ.
+pub fn domains_compatible(a: &str, b: &str) -> bool {
+    a.is_empty() || b.is_empty() || a == b
 }
 
 /// Why an event was not turned into an observation.
@@ -219,6 +240,18 @@ mod tests {
         assert!(parse(&logon4624(1, T, "jdoe", "127.0.0.1", "10"), false).is_ok());
         assert_eq!(parse(&lsm(21, 5, T, r"CORP\jdoe", "LOCAL", 1), true), Err(Skip::Irrelevant));
         assert!(matches!(parse("<not-xml", true), Err(Skip::Malformed(_))));
+    }
+
+    #[test]
+    fn domain_normalization() {
+        assert_eq!(normalize_domain("corp.local", "PC01"), "CORP");
+        assert_eq!(normalize_domain("Corp", "PC01"), "CORP");
+        assert_eq!(normalize_domain(".", "pc01.corp.local"), "PC01");
+        assert_eq!(normalize_domain("PC01", "PC01"), "PC01");
+        assert_eq!(normalize_domain(" ", "PC01"), "");
+        assert!(domains_compatible("CORP", ""));
+        assert!(domains_compatible("CORP", "CORP"));
+        assert!(!domains_compatible("CORP", "PC01"));
     }
 
     #[test]

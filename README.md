@@ -59,14 +59,16 @@ The service subscribes to:
 | TerminalServices-LocalSessionManager/Operational | 21 logon, 24 disconnect, 25 reconnect |
 | TerminalServices-RemoteConnectionManager/Operational | 1149 authentication (evidence only - never a connection by itself) |
 
-Events for the same user and source IP within 30 s are merged into one connection
-(new login or reconnection), so one RDP session produces one email. Only
+Events for the same account and source IP within 30 s are merged into one connection
+(new login or reconnection), so one RDP session produces one email
+(`CORP\admin` and the local `PC01\admin` are different accounts; `CORP` and
+`corp.local` are the same domain). Only
 RDP-specific events are selected (non-RDP logons such as network or service
 logons never reach the agent); built-in identities (`NT AUTHORITY`,
 `Window Manager`, `Font Driver Host`) and console (`LOCAL`) sessions are ignored.
 Loopback connections are reported by default because RDP through a local tunnel
 arrives from 127.0.0.1 (configurable). Every connection is stored in history; emails are subject to
-the per user+IP quiet period (default 15 min, 0 = every connection). Bookmarks let
+the per account+IP quiet period (default 15 min, 0 = every connection). Bookmarks let
 the service pick up events that happened while it was stopped.
 
 Undelivered emails are queued in SQLite and retried with exponential backoff
