@@ -12,6 +12,7 @@ pub const ST_COOLDOWN: &str = "suppressed: cooldown";
 pub const ST_DISABLED: &str = "suppressed: notification type disabled";
 pub const ST_NO_SMTP: &str = "not sent: email not configured";
 pub const ST_NA: &str = "history only";
+pub const ST_BELOW: &str = "history only: below alert threshold";
 
 /// Decides whether a finalized connection triggers a notification. History
 /// is always recorded regardless of the outcome.
@@ -33,6 +34,28 @@ pub fn decide(c: &Connection, cfg: &Config, last_notified: Option<DateTime<Utc>>
             if (c.time - last).abs() < Duration::minutes(n.cooldown_minutes as i64) {
                 return ST_COOLDOWN;
             }
+        }
+    }
+    ST_QUEUED
+}
+
+/// Failed logons: one email per source IP per cooldown, and never more often
+/// than once per counting window (also when the cooldown is 0).
+pub fn failed_cooldown_minutes(cfg: &Config) -> u32 {
+    cfg.notifications.cooldown_minutes.max(cfg.failed_logons.window_minutes)
+}
+
+/// Like `decide`, for a failed-logon burst that reached the threshold.
+pub fn decide_failed(cfg: &Config, time: DateTime<Utc>, last_notified: Option<DateTime<Utc>>) -> &'static str {
+    if !cfg.failed_logons.enabled {
+        return ST_DISABLED;
+    }
+    if !cfg.smtp.is_configured() {
+        return ST_NO_SMTP;
+    }
+    if let Some(last) = last_notified {
+        if (time - last).abs() < Duration::minutes(failed_cooldown_minutes(cfg) as i64) {
+            return ST_COOLDOWN;
         }
     }
     ST_QUEUED
@@ -67,6 +90,7 @@ pub fn type_label(k: Signal) -> &'static str {
         Signal::Reconnect => "Reconnection",
         Signal::Disconnect => "Disconnection",
         Signal::Auth => "Authentication",
+        Signal::Failed => "Failed logon",
     }
 }
 
@@ -141,6 +165,75 @@ pub fn alert_message(c: &Connection, host: &str, source_host: Option<&str>, cfg:
     Message { subject, text, html }
 }
 
+fn render(title: &str, rows: &[(&str, String)], notes: &[String], footer: &str) -> (String, String) {
+    let mut text = format!("{title}\r\n----------------------------------------\r\n");
+    for (k, v) in rows {
+        text.push_str(&format!("{:<18} {}\r\n", format!("{k}:"), v));
+    }
+    text.push_str("----------------------------------------\r\n");
+    let mut html = format!("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>{STYLE}</style></head><body><h2>{}</h2><table>", html_escape(title));
+    for (k, v) in rows {
+        html.push_str(&format!("<tr><th>{}</th><td>{}</td></tr>", html_escape(k), html_escape(v)));
+    }
+    html.push_str("</table>");
+    for n in notes {
+        text.push_str(n);
+        text.push_str("\r\n");
+        html.push_str(&format!("<p>{}</p>", html_escape(n)));
+    }
+    text.push_str(footer);
+    text.push_str("\r\n");
+    html.push_str(&format!("<p class=\"muted\">{} Sent by RDP Monitor {}.</p></body></html>", html_escape(footer), rdpmon_core::VERSION));
+    (text, html)
+}
+
+/// Counts distinct values, most frequent first: "a (3), b (1)" capped at `max`.
+fn tally<'a>(values: impl Iterator<Item = &'a str>, max: usize, label: impl Fn(&str) -> String) -> String {
+    let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
+    for v in values {
+        *counts.entry(v).or_default() += 1;
+    }
+    let mut v: Vec<(&str, u32)> = counts.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let more = v.len().saturating_sub(max);
+    let mut s = v.iter().take(max).map(|(k, n)| format!("{} ({n})", label(k))).collect::<Vec<_>>().join(", ");
+    if more > 0 {
+        s.push_str(&format!(" and {more} more"));
+    }
+    s
+}
+
+/// Alert for a burst of failed logons from one source IP.
+pub fn failed_message(b: &crate::failed::Burst, host: &str, source_host: Option<&str>, cfg: &Config, recovered: bool) -> Message {
+    let n = b.attempts.len();
+    let first = b.attempts.iter().map(|a| a.time).min().unwrap_or_default();
+    let last = b.attempts.iter().map(|a| a.time).max().unwrap_or_default();
+    let subject = one_line(&format!("FAILED LOGONS: {n} attempts from {} to {host}", b.ip), 200);
+    let rows = vec![
+        ("Computer", host.to_string()),
+        ("Source IP", b.ip.clone()),
+        ("Source hostname", source_host.unwrap_or("could not be resolved").to_string()),
+        ("Connection type", type_label(Signal::Failed).to_string()),
+        ("Failed attempts", format!("{n} within {} minutes", b.window_minutes)),
+        ("Accounts tried", tally(b.attempts.iter().map(|a| a.user.as_str()), 10, |u| if u.is_empty() { "(none)".into() } else { u.to_string() })),
+        ("Reasons", tally(b.attempts.iter().map(|a| a.status.as_str()), 10, crate::failed::reason)),
+        ("Logon types", tally(b.attempts.iter().map(|a| a.logon_type.as_str()), 5, crate::failed::logon_type_label)),
+        ("First attempt", local(first)),
+        ("Last attempt", local(last)),
+        ("Windows event IDs", "4625".into()),
+    ];
+    let mut notes = Vec::new();
+    if recovered {
+        notes.push("These attempts were recovered from the Windows event log after the monitoring service was restarted.".to_string());
+    }
+    let footer = format!(
+        "Further failed logons from this IP are recorded in history but not emailed for {} minutes.",
+        failed_cooldown_minutes(cfg)
+    );
+    let (text, html) = render("Repeated failed logons detected", &rows, &notes, &footer);
+    Message { subject, text, html }
+}
+
 // ---------------- weekly report ----------------
 
 /// The most recent scheduled report time at or before `now`.
@@ -168,7 +261,14 @@ pub fn next_report_slot(r: &ReportConfig, now: DateTime<Local>) -> Option<DateTi
     last_report_slot(r, last + Duration::days(7) + Duration::hours(2)).filter(|t| *t > now)
 }
 
-pub fn report_message(rows: &[ConnRow], host: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> Message {
+/// Report content beyond the RDP connection rows.
+#[derive(Debug, Default)]
+pub struct ReportExtra {
+    /// (failed logon attempts, distinct source IPs)
+    pub failed: (u64, u64),
+}
+
+pub fn report_message(rows: &[ConnRow], extra: &ReportExtra, host: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> Message {
     struct Agg {
         user: String,
         ip: String,
@@ -226,6 +326,11 @@ pub fn report_message(rows: &[ConnRow], host: &str, start: DateTime<Utc>, end: D
         users.len(),
         ips.len()
     );
+    if extra.failed.0 > 0 {
+        let f = format!("Failed logons: {} from {} source IP(s)", extra.failed.0, extra.failed.1);
+        text.push_str(&format!("{f}\r\n\r\n"));
+        html.push_str(&format!("<p>{}</p>", html_escape(&f)));
+    }
     if total == 0 {
         text.push_str("No RDP connections were recorded in this period.\r\n");
         html.push_str("<p>No RDP connections were recorded in this period.</p>");
@@ -335,17 +440,46 @@ mod tests {
     }
 
     #[test]
+    fn failed_logon_policy_and_rendering() {
+        use crate::failed::{Attempt, Burst};
+        let mut c = cfg();
+        let t = Utc::now();
+        assert_eq!(decide_failed(&c, t, None), ST_DISABLED, "opt-in");
+        c.failed_logons.enabled = true;
+        assert_eq!(decide_failed(&c, t, None), ST_QUEUED);
+        assert_eq!(decide_failed(&c, t, Some(t - Duration::minutes(10))), ST_COOLDOWN);
+        c.notifications.cooldown_minutes = 0;
+        assert_eq!(decide_failed(&c, t, Some(t - Duration::minutes(2))), ST_COOLDOWN, "never more than once per window");
+        let at = |u: &str, s: &str| Attempt { time: t, user: u.into(), logon_type: "3".into(), status: s.into() };
+        let b = Burst {
+            ip: "198.51.100.7".into(),
+            window_minutes: 5,
+            attempts: vec![at(r"CORP\<script>", "0xc000006a"), at(r"CORP\<script>", "0xc000006a"), at("root", "0xc0000064"), at("", "0xc0000064"), at("admin", "0xc000006a")],
+        };
+        let m = failed_message(&b, "PC01", Some("kali.example"), &c, false);
+        assert!(m.subject.contains("5 attempts from 198.51.100.7"));
+        assert!(m.text.contains("5 within 5 minutes"));
+        assert!(m.text.contains("wrong password (3)") && m.text.contains("unknown user name (2)"));
+        assert!(m.text.contains(r"CORP\<script> (2)") && m.text.contains("(none) (1)"));
+        assert!(m.html.contains("&lt;script&gt;") && !m.html.contains("<script>"));
+        assert!(m.text.contains("kali.example"));
+    }
+
+    #[test]
     fn report_aggregates() {
         let t = Utc::now();
         let row = |u: &str, ip: &str, k: &str, mins: i64| ConnRow { time: t - Duration::minutes(mins), kind: k.into(), user: u.into(), domain: "CORP".into(), ip: ip.into() };
         let rows = vec![row("jdoe", "1.1.1.1", "logon", 50), row("jdoe", "1.1.1.1", "reconnect", 40), row("asmith", "2.2.2.2", "logon", 30)];
-        let m = report_message(&rows, "PC01", t - Duration::days(7), t);
+        let m = report_message(&rows, &ReportExtra::default(), "PC01", t - Duration::days(7), t);
         assert!(m.text.contains("Total connections: 3"));
         assert!(m.text.contains("New logins: 2") && m.text.contains("Reconnections: 1"));
         assert!(m.text.contains("Distinct users: 2"));
         assert!(m.html.contains("CORP\\jdoe"));
-        let empty = report_message(&[], "PC01", t - Duration::days(7), t);
+        let empty = report_message(&[], &ReportExtra::default(), "PC01", t - Duration::days(7), t);
         assert!(empty.text.contains("No RDP connections"));
+        assert!(!empty.text.contains("Failed logons"));
+        let failed = report_message(&[], &ReportExtra { failed: (12, 2) }, "PC01", t - Duration::days(7), t);
+        assert!(failed.text.contains("Failed logons: 12 from 2 source IP(s)"));
     }
 
     #[test]

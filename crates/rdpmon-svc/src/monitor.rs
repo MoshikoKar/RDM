@@ -4,14 +4,15 @@
 //! re-subscription retries and a 5-minute subscription health check.
 
 use crate::app::Shared;
-use crate::correlate::{Connection, Correlator};
+use crate::correlate::{Connection, Correlator, EventRef};
 use crate::db::Db;
-use crate::events::{self, Skip, CH_LSM, CH_RCM, CH_SECURITY};
+use crate::events::{self, Observation, Signal, Skip, CH_LSM, CH_RCM, CH_SECURITY};
+use crate::failed::{self, FailedTracker};
 use crate::evt::{query_xml, Subscription};
 use crate::notify;
 use crate::winsec::{wait_any, Event};
 use crate::logging;
-use rdpmon_core::config::MonitoringConfig;
+use rdpmon_core::config::{Config, MonitoringConfig};
 use rdpmon_core::ipc::ChannelStatus;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -25,7 +26,7 @@ struct Channel {
     name: &'static str,
     sub: Option<Subscription>,
     signal: Event,
-    mon: MonitoringConfig,
+    cfg: Config,
     retry_at: Option<Instant>,
     status: ChannelStatus,
 }
@@ -36,18 +37,27 @@ fn max_age_ms(m: &MonitoringConfig) -> u64 {
 
 /// XPath selections per channel. The LogonType filter runs inside the event
 /// log service, so the agent never renders the (very frequent) non-RDP logons.
-pub fn channel_queries(m: &MonitoringConfig) -> Vec<(&'static str, Vec<String>)> {
-    channel_queries_aged(m, max_age_ms(m))
+pub fn channel_queries(c: &Config) -> Vec<(&'static str, Vec<String>)> {
+    channel_queries_aged(c, max_age_ms(&c.monitoring))
 }
 
-fn channel_queries_aged(m: &MonitoringConfig, age_ms: u64) -> Vec<(&'static str, Vec<String>)> {
+fn channel_queries_aged(c: &Config, age_ms: u64) -> Vec<(&'static str, Vec<String>)> {
+    let m = &c.monitoring;
     let age = format!("TimeCreated[timediff(@SystemTime) &lt;= {age_ms}]");
     let mut v = Vec::new();
+    let mut security = Vec::new();
     if m.security_log {
-        v.push((CH_SECURITY, vec![
-            format!("*[System[(EventID=4624) and {age}]] and *[EventData[Data[@Name='LogonType']='10']]"),
-            format!("*[System[(EventID=4778 or EventID=4779) and {age}]]"),
-        ]));
+        security.push(format!("*[System[(EventID=4624) and {age}]] and *[EventData[Data[@Name='LogonType']='10']]"));
+        security.push(format!("*[System[(EventID=4778 or EventID=4779) and {age}]]"));
+    }
+    if c.failed_logons.enabled {
+        // With NLA a failed RDP password is LogonType 3, not 10.
+        security.push(format!(
+            "*[System[(EventID=4625) and {age}]] and *[EventData[Data[@Name='LogonType']='3' or Data[@Name='LogonType']='10']]"
+        ));
+    }
+    if !security.is_empty() {
+        v.push((CH_SECURITY, security));
     }
     if m.session_manager_log {
         v.push((CH_LSM, vec![format!("*[System[(EventID=21 or EventID=24 or EventID=25) and {age}]]")]));
@@ -58,12 +68,12 @@ fn channel_queries_aged(m: &MonitoringConfig, age_ms: u64) -> Vec<(&'static str,
     v
 }
 
-fn build_channels(m: &MonitoringConfig) -> Vec<Channel> {
-    channel_queries(m)
+fn build_channels(c: &Config) -> Vec<Channel> {
+    channel_queries(c)
         .into_iter()
         .map(|(name, _)| Channel {
             name,
-            mon: m.clone(),
+            cfg: c.clone(),
             signal: Event::new(true).expect("create event"),
             sub: None,
             retry_at: Some(Instant::now()),
@@ -84,7 +94,8 @@ pub fn run(shared: Arc<Shared>) {
     };
     let mut cfg = shared.cfg();
     let mut corr = Correlator::new(cfg.monitoring.correlation_window_seconds, &shared.host);
-    let mut channels = build_channels(&cfg.monitoring);
+    let mut failed = FailedTracker::default();
+    let mut channels = build_channels(&cfg);
     let mut next_health = Instant::now() + HEALTH_INTERVAL;
 
     loop {
@@ -97,7 +108,7 @@ pub fn run(shared: Arc<Shared>) {
         }
         if opened_any {
             // Backlog from every channel has been read: correlate it completely.
-            drain_all(&shared, &mut db, &mut corr, &mut channels);
+            drain_all(&shared, &mut db, &mut corr, &mut failed, &mut channels);
             for c in corr.flush_all(Instant::now()) {
                 handle_connection(&shared, &mut db, &cfg, &c);
             }
@@ -150,7 +161,7 @@ pub fn run(shared: Arc<Shared>) {
                 corr.set_window(new.monitoring.correlation_window_seconds);
                 if shared.resubscribe.swap(false, Ordering::SeqCst) {
                     // Drain and settle what we have, then re-create subscriptions.
-                    drain_all(&shared, &mut db, &mut corr, &mut channels);
+                    drain_all(&shared, &mut db, &mut corr, &mut failed, &mut channels);
                     for c in corr.flush_all(Instant::now()) {
                         handle_connection(&shared, &mut db, &new, &c);
                     }
@@ -159,7 +170,7 @@ pub fn run(shared: Arc<Shared>) {
                             let _ = db.set_bookmark(ch.name, &bm);
                         }
                     }
-                    channels = build_channels(&new.monitoring);
+                    channels = build_channels(&new);
                     logging::info("event subscriptions re-created after configuration change");
                 }
                 cfg = new;
@@ -167,13 +178,13 @@ pub fn run(shared: Arc<Shared>) {
             Some(i) => {
                 let ch = &mut channels[i - 2];
                 ch.signal.reset();
-                drain_channel(&shared, &mut db, &mut corr, ch);
+                drain_channel(&shared, &mut db, &mut corr, &mut failed, ch);
             }
             None => {
                 if Instant::now() >= next_health {
                     // Health check: EvtNext on a broken subscription returns an
                     // error (e.g. Event Log service restarted) → re-subscribe.
-                    drain_all(&shared, &mut db, &mut corr, &mut channels);
+                    drain_all(&shared, &mut db, &mut corr, &mut failed, &mut channels);
                     next_health = Instant::now() + HEALTH_INTERVAL;
                 }
             }
@@ -188,12 +199,12 @@ fn open_channel(ch: &mut Channel, db: &Db) {
     // a restart or upgrade are not lost (duplicates are filtered later).
     let since_key = format!("monitored_since:{}", ch.name);
     let since = db.kv(&since_key).ok().flatten().and_then(|s| crate::db::parse_ts(&s));
-    let mut age = max_age_ms(&ch.mon);
+    let mut age = max_age_ms(&ch.cfg.monitoring);
     let from_oldest = bookmark.is_none() && since.is_some();
     if let (true, Some(t)) = (from_oldest, since) {
         age = age.min((chrono::Utc::now() - t).num_milliseconds().max(0) as u64 + 600_000);
     }
-    let selects = channel_queries_aged(&ch.mon, age).into_iter().find(|(n, _)| *n == ch.name).map(|x| x.1).unwrap_or_default();
+    let selects = channel_queries_aged(&ch.cfg, age).into_iter().find(|(n, _)| *n == ch.name).map(|x| x.1).unwrap_or_default();
     let q = query_xml(ch.name, &selects);
     match Subscription::open_with(&q, bookmark.as_deref(), from_oldest, ch.signal.0) {
         Ok(s) => {
@@ -229,13 +240,13 @@ fn describe_open_error(e: &std::io::Error) -> String {
     }
 }
 
-fn drain_all(shared: &Shared, db: &mut Db, corr: &mut Correlator, channels: &mut [Channel]) {
+fn drain_all(shared: &Shared, db: &mut Db, corr: &mut Correlator, failed: &mut FailedTracker, channels: &mut [Channel]) {
     for ch in channels.iter_mut() {
-        drain_channel(shared, db, corr, ch);
+        drain_channel(shared, db, corr, failed, ch);
     }
 }
 
-fn drain_channel(shared: &Shared, db: &mut Db, corr: &mut Correlator, ch: &mut Channel) {
+fn drain_channel(shared: &Shared, db: &mut Db, corr: &mut Correlator, failed: &mut FailedTracker, ch: &mut Channel) {
     let ignore_loopback = shared.cfg().monitoring.ignore_loopback;
     loop {
         let Some(sub) = ch.sub.as_mut() else { return };
@@ -248,7 +259,11 @@ fn drain_channel(shared: &Shared, db: &mut Db, corr: &mut Correlator, ch: &mut C
                             if db.is_processed(&o.channel, o.record_id, o.time).unwrap_or(false) {
                                 continue;
                             }
-                            corr.push(o, Instant::now());
+                            if o.signal == Signal::Failed {
+                                handle_failed(shared, db, failed, o);
+                            } else {
+                                corr.push(o, Instant::now());
+                            }
                         }
                         Err(Skip::Irrelevant) => {}
                         Err(Skip::Malformed(e)) => logging::warn(&format!("unparseable event on {}: {e}", ch.name)),
@@ -277,7 +292,7 @@ fn publish_status(shared: &Shared, channels: &[Channel]) {
     *shared.channels.lock().unwrap_or_else(|e| e.into_inner()) = channels.iter().map(|c| c.status.clone()).collect();
 }
 
-fn handle_connection(shared: &Shared, db: &mut Db, cfg: &rdpmon_core::config::Config, c: &Connection) {
+fn handle_connection(shared: &Shared, db: &mut Db, cfg: &Config, c: &Connection) {
     // Connections that happened while the service was not running.
     let recovered = c.time < shared.started - chrono::Duration::seconds(5);
     let last = db.cooldown_last(&c.key(&shared.host)).ok().flatten();
@@ -286,17 +301,57 @@ fn handle_connection(shared: &Shared, db: &mut Db, cfg: &rdpmon_core::config::Co
         let source_host = crate::resolve::hostname(&c.ip, crate::resolve::TIMEOUT);
         notify::alert_message(c, &shared.host, source_host.as_deref(), cfg, recovered)
     });
-    match db.record_connection(c, &shared.host, recovered, status, msg, cfg.notifications.max_queue) {
+    record(shared, db, cfg, c, &c.key(&shared.host), recovered, status, msg);
+}
+
+/// One failed logon: counted per source IP, always recorded in history,
+/// emailed once the IP reaches the threshold (outside its cooldown).
+fn handle_failed(shared: &Shared, db: &mut Db, tracker: &mut FailedTracker, o: Observation) {
+    let cfg = shared.cfg();
+    let f = &cfg.failed_logons;
+    let recovered = o.time < shared.started - chrono::Duration::seconds(5);
+    let user = if o.domain.is_empty() { o.user.clone() } else { format!("{}\\{}", o.domain, o.user) };
+    let attempt = failed::Attempt { time: o.time, user, logon_type: o.logon_type.clone(), status: o.status.clone() };
+    let key = format!("failed|{}", o.ip);
+    let burst = tracker.push(&o.ip, attempt, f.window_minutes, f.threshold);
+    let status = match &burst {
+        None => notify::ST_BELOW,
+        Some(_) => notify::decide_failed(&cfg, o.time, db.cooldown_last(&key).ok().flatten()),
+    };
+    let msg = burst.filter(|_| status == notify::ST_QUEUED).map(|b| {
+        let source_host = crate::resolve::hostname(&b.ip, crate::resolve::TIMEOUT);
+        notify::failed_message(&b, &shared.host, source_host.as_deref(), &cfg, recovered)
+    });
+    let c = Connection {
+        kind: Signal::Failed,
+        time: o.time,
+        refs: vec![EventRef { channel: o.channel, record_id: o.record_id, time: o.time }],
+        event_ids: vec![o.event_id],
+        user: o.user,
+        domain: o.domain,
+        ip: o.ip,
+        ..Default::default()
+    };
+    record(shared, db, &cfg, &c, &key, recovered, status, msg);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record(shared: &Shared, db: &mut Db, cfg: &Config, c: &Connection, key: &str, recovered: bool, status: &str, msg: Option<crate::db::Message>) {
+    match db.record_connection(c, &shared.host, key, recovered, status, msg, cfg.notifications.max_queue) {
         Ok((_, dropped)) => {
-            logging::info(&format!(
-                "{} {}\\{} from {} (events {:?}){} - {status}",
-                crate::db::kind_name(c.kind),
-                c.domain,
-                c.user,
-                c.ip,
-                c.event_ids,
-                if recovered { " [recovered]" } else { "" }
-            ));
+            // Individual failed logons below the threshold are not logged:
+            // a password spray would flood the service log.
+            if status != notify::ST_BELOW {
+                logging::info(&format!(
+                    "{} {}\\{} from {} (events {:?}){} - {status}",
+                    crate::db::kind_name(c.kind),
+                    c.domain,
+                    c.user,
+                    c.ip,
+                    c.event_ids,
+                    if recovered { " [recovered]" } else { "" }
+                ));
+            }
             if dropped {
                 let _ = db.audit("delivery", "notification dropped", "queue limit reached; oldest pending notification discarded");
             }
@@ -322,7 +377,9 @@ mod tests {
     /// service (using the Application channel, which needs no elevation).
     #[test]
     fn production_queries_are_accepted_by_windows() {
-        for (_, selects) in channel_queries(&MonitoringConfig::default()) {
+        let mut all = Config::default();
+        all.failed_logons.enabled = true;
+        for (_, selects) in channel_queries(&all) {
             let sig = Event::new(true).unwrap();
             Subscription::open(&query_xml("Application", &selects), None, sig.0).expect("query rejected");
         }

@@ -123,6 +123,23 @@ impl Default for MonitoringConfig {
     }
 }
 
+/// Alerts on repeated failed logons (4625, LogonType 3 or 10) from one IP.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FailedLogonConfig {
+    /// Off by default; the 4625 subscription exists only when enabled.
+    pub enabled: bool,
+    /// Failures from one IP within the window that trigger an alert.
+    pub threshold: u32,
+    pub window_minutes: u32,
+}
+
+impl Default for FailedLogonConfig {
+    fn default() -> Self {
+        Self { enabled: false, threshold: 5, window_minutes: 5 }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReportConfig {
@@ -207,6 +224,7 @@ pub struct Config {
     pub smtp: SmtpConfig,
     pub notifications: NotificationConfig,
     pub monitoring: MonitoringConfig,
+    pub failed_logons: FailedLogonConfig,
     pub report: ReportConfig,
     pub retention: RetentionConfig,
     pub security: SecurityConfig,
@@ -293,6 +311,13 @@ impl Config {
         }
         if !(5..=300).contains(&m.correlation_window_seconds) {
             errs.push("Correlation window must be between 5 and 300 seconds.".into());
+        }
+        let f = &self.failed_logons;
+        if !(1..=1000).contains(&f.threshold) {
+            errs.push("Failed logon threshold must be between 1 and 1000.".into());
+        }
+        if !(1..=1440).contains(&f.window_minutes) {
+            errs.push("Failed logon window must be between 1 and 1440 minutes.".into());
         }
         let r = &self.report;
         if parse_weekday(&r.day).is_none() {
@@ -468,8 +493,10 @@ mod tests {
         c.notifications.subject_format = "line1\r\nBcc: evil@example.com".into();
         c.updates.provider = UpdateProvider::Github;
         c.updates.repository_url = "http://github.com/a/b".into();
+        c.failed_logons.threshold = 0;
+        c.failed_logons.window_minutes = 0;
         let errs = c.validate().unwrap_err();
-        assert!(errs.len() >= 7, "{errs:?}");
+        assert!(errs.len() >= 9, "{errs:?}");
     }
 
     #[test]

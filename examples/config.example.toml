@@ -36,6 +36,11 @@ ignore_loopback = false          # true = ignore 127.0.0.1 / ::1 (tunnelled RDP 
 recovery_max_hours = 168         # after a restart, recover missed events up to 7 days old
 correlation_window_seconds = 30  # events of one connection arrive within this window
 
+[failed_logons]
+enabled = false                  # email when one source IP fails to log on repeatedly (Security 4625)
+threshold = 5                    # failures from one IP within the window that trigger an email
+window_minutes = 5
+
 [report]
 enabled = true
 day = "monday"

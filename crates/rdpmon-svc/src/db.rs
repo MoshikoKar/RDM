@@ -28,6 +28,7 @@ pub fn kind_name(k: Signal) -> &'static str {
         Signal::Reconnect => "reconnect",
         Signal::Disconnect => "disconnect",
         Signal::Auth => "auth",
+        Signal::Failed => "failed",
     }
 }
 
@@ -147,12 +148,15 @@ impl Db {
     }
 
     /// Records a finalized connection atomically: history row, processed
-    /// event ids, cooldown state and (optionally) a queued notification.
-    /// Returns the connection id and whether an older queued item was dropped.
+    /// event ids, cooldown state (under `cooldown_key`) and (optionally) a
+    /// queued notification. Returns the connection id and whether an older
+    /// queued item was dropped.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_connection(
         &mut self,
         c: &Connection,
         hostname: &str,
+        cooldown_key: &str,
         recovered: bool,
         status: &str,
         message: Option<Message>,
@@ -177,7 +181,7 @@ impl Db {
         if let Some(m) = message {
             tx.execute(
                 "INSERT INTO cooldown (key, last_time) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET last_time=excluded.last_time",
-                params![c.key(hostname), ts(c.time)],
+                params![cooldown_key, ts(c.time)],
             )?;
             dropped = enqueue_tx(&tx, "alert", &format!("conn:{conn_id}"), Some(conn_id), &m, max_queue)?;
         }
@@ -200,6 +204,15 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    /// Failed logons in the period: (attempts, distinct source IPs).
+    pub fn failed_between(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<(u64, u64)> {
+        self.conn.query_row(
+            "SELECT count(*), count(DISTINCT source_ip) FROM connections WHERE event_time >= ?1 AND event_time < ?2 AND kind='failed'",
+            params![ts(start), ts(end)],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+        )
     }
 
     pub fn recent_history(&self, limit: u32) -> Result<Vec<HistoryEntry>> {
@@ -445,12 +458,12 @@ mod tests {
         let t = Utc::now();
         let c = conn("jdoe", t);
         assert!(!db.is_processed("Security", 77, t).unwrap());
-        db.record_connection(&c, "PC01", false, "queued", Some(msg()), 100).unwrap();
+        db.record_connection(&c, "PC01", &c.key("PC01"), false, "queued", Some(msg()), 100).unwrap();
         assert!(db.is_processed("Security", 77, t).unwrap());
         assert!(!db.is_processed("Security", 77, t + Duration::seconds(1)).unwrap(), "cleared log reusing ids is not a duplicate");
         assert_eq!(db.cooldown_last(&c.key("PC01")).unwrap().map(ts), Some(ts(t)));
         assert_eq!(db.outbox_counts().unwrap(), (1, 0));
-        db.record_connection(&conn("asmith", t), "PC01", false, "cooldown", None, 100).unwrap();
+        db.record_connection(&conn("asmith", t), "PC01", "k", false, "cooldown", None, 100).unwrap();
         assert_eq!(db.outbox_counts().unwrap(), (1, 0));
         assert_eq!(db.recent_history(10).unwrap().len(), 2);
         assert_eq!(db.connections_between(t - Duration::hours(1), t + Duration::hours(1)).unwrap().len(), 2);
@@ -463,12 +476,28 @@ mod tests {
         let corp = conn("admin", t);
         let mut local = conn("admin", t);
         local.domain = "PC01".into();
-        db.record_connection(&corp, "PC01", false, "queued", Some(msg()), 100).unwrap();
+        db.record_connection(&corp, "PC01", &corp.key("PC01"), false, "queued", Some(msg()), 100).unwrap();
         assert!(db.cooldown_last(&corp.key("PC01")).unwrap().is_some());
         assert!(db.cooldown_last(&local.key("PC01")).unwrap().is_none(), "local account is not in cooldown");
         let mut fqdn = conn("Admin", t);
         fqdn.domain = "corp.local".into();
         assert!(db.cooldown_last(&fqdn.key("PC01")).unwrap().is_some(), "same account, other domain form");
+    }
+
+    #[test]
+    fn failed_logons_are_counted_but_not_listed_as_connections() {
+        let mut db = Db::memory();
+        let t = Utc::now();
+        for (i, ip) in ["198.51.100.7", "198.51.100.7", "203.0.113.9"].iter().enumerate() {
+            let mut f = conn("admin", t);
+            f.kind = Signal::Failed;
+            f.ip = ip.to_string();
+            f.refs[0].record_id = 100 + i as u64;
+            db.record_connection(&f, "PC01", &format!("failed|{ip}"), false, "n/a", None, 10).unwrap();
+        }
+        let range = (t - Duration::hours(1), t + Duration::hours(1));
+        assert_eq!(db.failed_between(range.0, range.1).unwrap(), (3, 2));
+        assert!(db.connections_between(range.0, range.1).unwrap().is_empty());
     }
 
     #[test]
@@ -516,8 +545,8 @@ mod tests {
     fn retention_cleanup() {
         let mut db = Db::memory();
         let old = Utc::now() - Duration::days(400);
-        db.record_connection(&conn("old", old), "PC", false, "n/a", None, 10).unwrap();
-        db.record_connection(&conn("new", Utc::now()), "PC", false, "n/a", None, 10).unwrap();
+        db.record_connection(&conn("old", old), "PC", "k1", false, "n/a", None, 10).unwrap();
+        db.record_connection(&conn("new", Utc::now()), "PC", "k2", false, "n/a", None, 10).unwrap();
         db.audit("admin", "x", "y").unwrap();
         db.cleanup(&RetentionConfig::default(), Utc::now()).unwrap();
         let h = db.recent_history(10).unwrap();

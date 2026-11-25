@@ -113,7 +113,7 @@ impl Shared {
             self.mark_initialized();
         }
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = new.clone();
-        if old.monitoring != new.monitoring {
+        if old.monitoring != new.monitoring || crate::monitor::channel_queries(&old) != crate::monitor::channel_queries(&new) {
             self.resubscribe.store(true, Ordering::SeqCst);
         }
         self.config_changed.set();

@@ -102,6 +102,9 @@ export component AppWindow inherits Window {
     in-out property <bool> auth-log: true;
     in-out property <bool> ignore-loopback: false;
     in-out property <string> recovery-hours: "168";
+    in-out property <bool> failed-enabled: false;
+    in-out property <string> failed-threshold: "5";
+    in-out property <string> failed-window: "5";
     in-out property <string> history-days: "365";
     in-out property <bool> report-enabled: true;
     in-out property <int> report-day: 0;
@@ -745,6 +748,32 @@ export component AppWindow inherits Window {
                             }
                             Hint {
                                 text: "The same account (domain and user) from the same IP is emailed at most once per quiet period. 0 = email every distinct connection.";
+                            }
+                            Section {
+                                text: "Failed logons";
+                            }
+                            CheckBox {
+                                text: "Email when one IP fails to log on repeatedly (Security 4625, network and remote desktop logons)";
+                                checked <=> root.failed-enabled;
+                            }
+                            Row {
+                                label: "Failures / within minutes";
+                                LineEdit {
+                                    text <=> root.failed-threshold;
+                                    input-type: number;
+                                    width: 100px;
+                                    enabled: root.failed-enabled;
+                                }
+                                LineEdit {
+                                    text <=> root.failed-window;
+                                    input-type: number;
+                                    width: 100px;
+                                    enabled: root.failed-enabled;
+                                }
+                                Rectangle { }
+                            }
+                            Hint {
+                                text: "Needs 'Audit Logon' failure auditing (on by default). With NLA a wrong RDP password is a network (type 3) logon, so file-share and other network logon failures are counted too. One email per IP per quiet period (at least the counting window).";
                             }
                             Section {
                                 text: "History";

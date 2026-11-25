@@ -147,6 +147,9 @@ fn fill_config(ui: &AppWindow, c: &Config, has_pw: bool, has_tok: bool) {
     ui.set_auth_log(m.auth_log);
     ui.set_ignore_loopback(m.ignore_loopback);
     ui.set_recovery_hours(m.recovery_max_hours.to_string().into());
+    ui.set_failed_enabled(c.failed_logons.enabled);
+    ui.set_failed_threshold(c.failed_logons.threshold.to_string().into());
+    ui.set_failed_window(c.failed_logons.window_minutes.to_string().into());
     ui.set_history_days(c.retention.history_days.to_string().into());
     let r = &c.report;
     ui.set_report_enabled(r.enabled);
@@ -207,6 +210,9 @@ fn read_config(ui: &AppWindow) -> Result<(Config, Option<String>, Option<String>
     c.monitoring.auth_log = ui.get_auth_log();
     c.monitoring.ignore_loopback = ui.get_ignore_loopback();
     c.monitoring.recovery_max_hours = parse_num(&ui.get_recovery_hours(), "Recovery period")?;
+    c.failed_logons.enabled = ui.get_failed_enabled();
+    c.failed_logons.threshold = parse_num(&ui.get_failed_threshold(), "Failed logon threshold")?;
+    c.failed_logons.window_minutes = parse_num(&ui.get_failed_window(), "Failed logon window")?;
     c.retention.history_days = parse_num(&ui.get_history_days(), "History retention")?;
     c.report.enabled = ui.get_report_enabled();
     c.report.day = DAYS[(ui.get_report_day().clamp(0, 6)) as usize].to_string();

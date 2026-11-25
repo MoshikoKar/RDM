@@ -81,6 +81,18 @@ Undelivered emails are queued in SQLite and retried with exponential backoff
 > Session Manager events still detect reconnections.
 > `auditpol /set /subcategory:"Other Logon/Logoff Events" /success:enable`
 
+### Optional alerts (all off by default)
+
+**Failed logons** (`[failed_logons]`): subscribes to Security 4625 with
+LogonType 3 or 10. With NLA (the default) a wrong RDP password is logged as a
+*network* (type 3) logon, so the count also includes failed file-share and other
+network logons, and the email says "Failed logon", not "RDP". Each attempt is
+stored in history; an email is sent when one source IP reaches `threshold`
+failures within `window_minutes` (default 5 in 5 min), then at most once per IP
+per quiet period (never more often than the window). The weekly report shows the
+total. Needs *Audit Logon* failure auditing, which Windows enables by default:
+`auditpol /set /subcategory:"Logon" /failure:enable`
+
 ## Troubleshoot
 
 ```powershell

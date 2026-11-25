@@ -255,6 +255,9 @@ fn changed_sections(a: &Config, b: &Config) -> String {
     if a.monitoring != b.monitoring {
         v.push("monitoring");
     }
+    if a.failed_logons != b.failed_logons {
+        v.push("failed logons");
+    }
     if a.report != b.report {
         v.push("weekly report");
     }
