@@ -83,7 +83,7 @@ pub fn run(shared: Arc<Shared>) {
         }
     };
     let mut cfg = shared.cfg();
-    let mut corr = Correlator::new(cfg.monitoring.correlation_window_seconds);
+    let mut corr = Correlator::new(cfg.monitoring.correlation_window_seconds, &shared.host);
     let mut channels = build_channels(&cfg.monitoring);
     let mut next_health = Instant::now() + HEALTH_INTERVAL;
 
@@ -280,7 +280,7 @@ fn publish_status(shared: &Shared, channels: &[Channel]) {
 fn handle_connection(shared: &Shared, db: &mut Db, cfg: &rdpmon_core::config::Config, c: &Connection) {
     // Connections that happened while the service was not running.
     let recovered = c.time < shared.started - chrono::Duration::seconds(5);
-    let last = db.cooldown_last(&c.key()).ok().flatten();
+    let last = db.cooldown_last(&c.key(&shared.host)).ok().flatten();
     let status = notify::decide(c, cfg, last);
     let msg = (status == notify::ST_QUEUED).then(|| {
         let source_host = crate::resolve::hostname(&c.ip, crate::resolve::TIMEOUT);

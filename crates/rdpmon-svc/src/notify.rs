@@ -102,16 +102,21 @@ pub fn alert_message(c: &Connection, host: &str, source_host: Option<&str>, cfg:
         0 => "Every distinct connection is reported.".to_string(),
         m => format!("Further connections by this user from this IP are not reported for {m} minutes."),
     };
-    let rows = [
+    let mut rows = vec![
         ("Computer", host.to_string()),
         ("User", user_full),
         ("Source IP", c.ip.clone()),
         ("Source hostname", source_host.unwrap_or("could not be resolved").to_string()),
+    ];
+    if !c.other_ips.is_empty() {
+        rows.push(("Other addresses seen", c.other_ips.join(", ")));
+    }
+    rows.extend([
         ("Connection type", kind.to_string()),
         ("Date and time", when),
         ("Session ID", session),
         ("Windows event IDs", ids),
-    ];
+    ]);
     let mut text = String::from("Remote Desktop connection detected\r\n----------------------------------------\r\n");
     for (k, v) in &rows {
         text.push_str(&format!("{:<18} {}\r\n", format!("{k}:"), v));
@@ -284,6 +289,7 @@ mod tests {
             session_id: None,
             event_ids: vec![4624],
             refs: vec![EventRef { channel: "Security".into(), record_id: 1, time: t }],
+            ..Default::default()
         }
     }
 
@@ -323,6 +329,9 @@ mod tests {
         assert!(m.text.contains("Source hostname:   ITMOSHE.corp.example"));
         let unresolved = alert_message(&x, "PC01", None, &c, false);
         assert!(unresolved.html.contains("<th>Source hostname</th><td>could not be resolved</td>"));
+        assert!(!unresolved.text.contains("Other addresses seen"));
+        x.other_ips = vec!["10.0.0.1".into()];
+        assert!(alert_message(&x, "PC01", None, &c, false).html.contains("<th>Other addresses seen</th><td>10.0.0.1</td>"));
     }
 
     #[test]
