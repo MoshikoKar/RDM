@@ -132,6 +132,8 @@ export component AppWindow inherits Window {
     in-out property <string> update-token;
     in-out property <bool> has-update-token;
     in-out property <string> signing-key;
+    in-out property <bool> auto-update: true;
+    in-out property <string> update-time: "03:00";
     in-out property <string> update-latest;
     in-out property <string> update-notes;
     in-out property <string> update-message;
@@ -1032,11 +1034,24 @@ export component AppWindow inherits Window {
                                 label: "Update signing key";
                                 LineEdit {
                                     text <=> root.signing-key;
-                                    placeholder-text: "Base64 Ed25519 public key";
+                                    placeholder-text: "Built-in key of the official releases";
                                 }
                             }
+                            CheckBox {
+                                text: "Install new versions automatically (checked once a day)";
+                                checked <=> root.auto-update;
+                            }
+                            Row {
+                                label: "Daily check time";
+                                LineEdit {
+                                    text <=> root.update-time;
+                                    width: 90px;
+                                    enabled: root.auto-update;
+                                }
+                                Rectangle { }
+                            }
                             Hint {
-                                text: "Save changes to these settings before checking. Updates are only checked when you click the button below, and only packages signed with the update signing key are installed.";
+                                text: "The agent checks the repository daily and installs newer releases by itself; settings and history are kept. Only packages signed with the update signing key are installed. Leave the key empty to use the built-in key of the official releases.";
                             }
                             HorizontalLayout {
                                 spacing: 10px;

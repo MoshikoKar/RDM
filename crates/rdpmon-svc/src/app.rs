@@ -1,5 +1,5 @@
-//! Service runtime: shared state and the three worker threads
-//! (event monitor, notification delivery, local administration pipe).
+//! Service runtime: shared state and the worker threads (event monitor,
+//! notification delivery, local administration pipe, daily updates).
 
 use crate::db::Db;
 use crate::store::{ConfigStore, Loaded};
@@ -158,6 +158,7 @@ pub fn run(shared: Arc<Shared>) {
         ("monitor", spawn(&shared, crate::monitor::run)),
         ("delivery", spawn(&shared, crate::delivery::run)),
         ("admin-pipe", spawn(&shared, crate::ipc_server::run)),
+        ("updates", spawn(&shared, crate::update::run)),
     ];
     winsec::wait_any(&[shared.stop.0], u32::MAX);
     for (name, t) in threads {

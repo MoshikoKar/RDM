@@ -262,7 +262,12 @@ impl Default for SecurityConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// Official release repository, used when no other source is configured.
+pub const DEFAULT_UPDATE_REPOSITORY: &str = "https://github.com/MoshikoKar/RDM";
+/// Public half of the key the official release workflow signs packages with.
+pub const BUILTIN_UPDATE_SIGNING_KEY: &str = "SS5E0F0F1ouuO/5Ww0R5IDU06YpYjPbCEb66Jued9dg=";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UpdateConfig {
     pub provider: UpdateProvider,
@@ -270,9 +275,45 @@ pub struct UpdateConfig {
     pub repository_url: String,
     /// Secret. Personal/project access token for private repositories.
     pub token: String,
-    /// Base64 Ed25519 public key that signs release packages.
+    /// Base64 Ed25519 public key that signs release packages. Empty = the
+    /// built-in key of the official releases.
     pub signing_public_key: String,
     pub allow_prerelease: bool,
+    /// Check once a day and install a newer signed release automatically.
+    pub auto_install: bool,
+    /// Local time (HH:MM) of the daily check.
+    pub check_time: String,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            provider: UpdateProvider::Github,
+            repository_url: DEFAULT_UPDATE_REPOSITORY.into(),
+            token: String::new(),
+            signing_public_key: String::new(),
+            allow_prerelease: false,
+            auto_install: true,
+            check_time: "03:00".into(),
+        }
+    }
+}
+
+impl UpdateConfig {
+    /// The key release signatures are verified with.
+    pub fn effective_signing_key(&self) -> &str {
+        if self.signing_public_key.is_empty() { BUILTIN_UPDATE_SIGNING_KEY } else { &self.signing_public_key }
+    }
+
+    /// Versions before 0.2.1 defaulted to no update source and saved that
+    /// explicitly; a source that was never set up gets the official one.
+    fn migrate_unconfigured(&mut self) {
+        if self.provider == UpdateProvider::None && self.repository_url.is_empty() && self.signing_public_key.is_empty() && self.token.is_empty() {
+            let keep = (self.allow_prerelease, self.auto_install, self.check_time.clone());
+            *self = Self::default();
+            (self.allow_prerelease, self.auto_install, self.check_time) = keep;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -292,7 +333,9 @@ pub struct Config {
 
 impl Config {
     pub fn from_toml(text: &str) -> Result<Self, String> {
-        toml::from_str(text).map_err(|e| format!("Invalid configuration: {e}"))
+        let mut c: Self = toml::from_str(text).map_err(|e| format!("Invalid configuration: {e}"))?;
+        c.updates.migrate_unconfigured();
+        Ok(c)
     }
 
     /// Failed logons (4625) are watched for the failed-logon alert itself or
@@ -452,9 +495,9 @@ impl Config {
             } else if repo_host_and_path(&u.repository_url).is_none() {
                 errs.push("Update repository URL must look like https://host/owner/project".into());
             }
-            if u.signing_public_key.is_empty() {
-                errs.push("A trusted update signing key is required when updates are enabled.".into());
-            }
+        }
+        if parse_hhmm(&u.check_time).is_none() {
+            errs.push("Update check time must be HH:MM (24-hour).".into());
         }
         if !u.signing_public_key.is_empty() && crate::crypto::decode_public_key(&u.signing_public_key).is_err() {
             errs.push("Update signing key is not a valid Ed25519 public key.".into());
@@ -626,6 +669,32 @@ mod tests {
         c.smb.exclude_shares = vec![r"\\host\C$".into()];
         let errs = c.validate().unwrap_err();
         assert!(errs.len() >= 10, "{errs:?}");
+    }
+
+    #[test]
+    fn updates_default_to_official_source() {
+        let c = Config::default();
+        assert_eq!(c.updates.provider, UpdateProvider::Github);
+        assert_eq!(c.updates.repository_url, DEFAULT_UPDATE_REPOSITORY);
+        assert!(c.updates.auto_install);
+        assert!(crate::crypto::decode_public_key(c.updates.effective_signing_key()).is_ok());
+        assert!(c.validate().is_ok());
+        // Saved by an older version that had no update source set up.
+        let old = Config::from_toml("[updates]
+provider = \"none\"
+repository_url = \"\"
+signing_public_key = \"\"
+").unwrap();
+        assert_eq!(old.updates.provider, UpdateProvider::Github);
+        // A deliberately configured source is kept.
+        let own = Config::from_toml("[updates]
+provider = \"gitlab\"
+repository_url = \"https://gl.example.com/it/rdp\"
+").unwrap();
+        assert_eq!(own.updates.repository_url, "https://gl.example.com/it/rdp");
+        let mut bad = Config::default();
+        bad.updates.check_time = "3am".into();
+        assert!(bad.validate().is_err());
     }
 
     #[test]

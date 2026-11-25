@@ -7,9 +7,13 @@
   .\scripts\build.ps1 -Release -ReleaseKey C:\keys\release.key -CertThumbprint 0123ABCD...
 
 .PARAMETER Release
-  A build for deployment: fails unless both -ReleaseKey and -CertThumbprint
-  are given. Without -Release, a build missing either is a development build:
-  the MSI is named *-unsigned.msi and a warning is printed.
+  A build for deployment: fails unless -ReleaseKey (or -ReleaseKeyEnv) is
+  given. Without the release key the MSI is a development build named
+  *-unsigned.msi, which the update client never accepts. Authenticode
+  (-CertThumbprint) is optional.
+
+.PARAMETER ReleaseKeyEnv
+  For CI: name of an environment variable holding the release key text.
 
 .PARAMETER ReleaseKey
   Optional rdpmon-tool private key. When given, writes dist\<msi>.sig for
@@ -22,6 +26,7 @@ param(
     [switch]$Release,
     [switch]$SkipTests,
     [string]$ReleaseKey,
+    [string]$ReleaseKeyEnv,
     [string]$CertThumbprint,
     [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
@@ -36,9 +41,17 @@ try {
     if (-not $version) { throw "cannot read version from Cargo.toml" }
     Write-Host "== RDP Monitor $version"
 
-    $signed = [bool]$CertThumbprint -and [bool]$ReleaseKey
+    $tmpKey = $null
+    if ($ReleaseKeyEnv) {
+        $text = [Environment]::GetEnvironmentVariable($ReleaseKeyEnv)
+        if (-not $text) { throw "environment variable $ReleaseKeyEnv is empty" }
+        $tmpKey = Join-Path ([IO.Path]::GetTempPath()) ("rdpmon-" + [guid]::NewGuid() + ".key")
+        [IO.File]::WriteAllText($tmpKey, $text.Trim())
+        $ReleaseKey = $tmpKey
+    }
+    $signed = [bool]$ReleaseKey
     if ($Release -and -not $signed) {
-        Write-Host "ERROR: -Release needs both -CertThumbprint (Authenticode) and -ReleaseKey (update signature)." -ForegroundColor Red
+        Write-Host "ERROR: -Release needs -ReleaseKey (update signature)." -ForegroundColor Red
         exit 1
     }
 
@@ -85,17 +98,18 @@ try {
 
     if ($ReleaseKey) {
         & "$bin\rdpmon-tool.exe" sign-release --key $ReleaseKey --file $msi --version $version
-        if ($LASTEXITCODE) { throw "release signing failed" }
+        $rc = $LASTEXITCODE
+        if ($tmpKey) { Remove-Item $tmpKey -Force -ErrorAction SilentlyContinue }
+        if ($rc) { throw "release signing failed" }
     }
     Copy-Item "$bin\rdpmon-tool.exe" $dist -Force
     Write-Host "== Built $msi"
     Get-ChildItem $dist | Format-Table Name, Length
     if (-not $signed) {
-        $missing = @()
-        if (-not $CertThumbprint) { $missing += "no Authenticode signature (-CertThumbprint)" }
-        if (-not $ReleaseKey) { $missing += "no update signature (-ReleaseKey)" }
         Write-Host ""
-        Write-Host "UNSIGNED BUILD - not for deployment ($($missing -join ', '))." -ForegroundColor Yellow
-        Write-Host "Use -Release with both signing options for a deployable build." -ForegroundColor Yellow
+        Write-Host "UNSIGNED BUILD - not for deployment (no update signature, -ReleaseKey)." -ForegroundColor Yellow
+        Write-Host "Use -Release -ReleaseKey <key> for a deployable build." -ForegroundColor Yellow
+    } elseif (-not $CertThumbprint) {
+        Write-Host "Note: no Authenticode signature (-CertThumbprint); manual installs show an unknown publisher." -ForegroundColor Yellow
     }
 } finally { Pop-Location }

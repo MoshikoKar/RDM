@@ -178,6 +178,8 @@ fn fill_config(ui: &AppWindow, c: &Config, has_pw: bool, has_tok: bool) {
     ui.set_update_token("".into());
     ui.set_has_update_token(has_tok);
     ui.set_signing_key(u.signing_public_key.clone().into());
+    ui.set_auto_update(u.auto_install);
+    ui.set_update_time(u.check_time.clone().into());
 
     let onoff = |b: bool| if b { "on" } else { "off" };
     let cooldown = if n.cooldown_minutes == 0 { "every connection is emailed".to_string() } else { format!("{} minutes", n.cooldown_minutes) };
@@ -247,6 +249,8 @@ fn read_config(ui: &AppWindow) -> Result<(Config, Option<String>, Option<String>
     };
     c.updates.repository_url = ui.get_repo_url().trim().to_string();
     c.updates.signing_public_key = ui.get_signing_key().trim().to_string();
+    c.updates.auto_install = ui.get_auto_update();
+    c.updates.check_time = ui.get_update_time().trim().to_string();
     let pw = ui.get_smtp_password().to_string();
     let smtp_pw = if pw.is_empty() && has_pw && !c.smtp.username.is_empty() { None } else { Some(pw) };
     let tok = ui.get_update_token().trim().to_string();

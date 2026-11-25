@@ -10,7 +10,8 @@
   Neither property carries a secret. Never pass passwords on the msiexec command line.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
   <Package Name="RDP Monitor"
            Manufacturer="RDP Monitor"
@@ -26,6 +27,13 @@
     <MajorUpgrade Schedule="afterInstallInitialize"
                   DowngradeErrorMessage="A newer version of RDP Monitor is already installed. Downgrades are not allowed." />
     <MediaTemplate EmbedCab="yes" />
+
+    <!-- Close a running configuration utility (any session) before files are
+         replaced, so an upgrade never waits for a reboot. The service itself
+         is stopped and restarted by ServiceControl below. -->
+    <util:CloseApplication Id="CloseConfigUtility" Target="rdpmon-config.exe"
+                           CloseMessage="yes" ElevatedCloseMessage="yes"
+                           TerminateProcess="1" RebootPrompt="no" />
 
     <Launch Condition="VersionNT64" Message="RDP Monitor requires 64-bit Windows." />
     <Launch Condition="Privileged" Message="RDP Monitor must be installed by an administrator." />

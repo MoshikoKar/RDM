@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.1 - 2026-11-25
+
+### Added
+- **Automatic updates.** Agents check the official GitHub repository once a day
+  (03:00 by default) and install newer signed releases themselves. Settings and
+  history are kept. Use the Updates page to turn this off or change the time.
+- Releases are built, signed and published by GitHub Actions when a `v*` tag is
+  pushed.
+
+### Changed
+- No update configuration is needed: the official repository and its signing
+  key are built in. Agents that never had an update source set up switch to it
+  automatically.
+- Upgrades close a running configuration utility first, so files are never left
+  waiting for a reboot.
+- **Check for updates** asks you to save changed update settings first, instead
+  of reporting an invalid repository URL.
+
 ## 0.2.0 - 2026-11-25
 
 Every new alert type is **off by default**. With an unchanged configuration,
