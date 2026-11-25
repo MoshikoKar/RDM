@@ -62,7 +62,10 @@ The service subscribes to:
 Events for the same account and source IP within 30 s are merged into one connection
 (new login or reconnection), so one RDP session produces one email
 (`CORP\admin` and the local `PC01\admin` are different accounts; `CORP` and
-`corp.local` are the same domain). Only
+`corp.local` are the same domain). If the events of one session report different
+addresses (RD Gateway or NAT in front of the host, IPv4 and IPv6 of one client),
+they are still merged unless their session or logon IDs differ; the 4624 address
+is then the Source IP and the others are listed as "Other addresses seen". Only
 RDP-specific events are selected (non-RDP logons such as network or service
 logons never reach the agent); built-in identities (`NT AUTHORITY`,
 `Window Manager`, `Font Driver Host`) and console (`LOCAL`) sessions are ignored.

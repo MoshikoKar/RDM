@@ -3,17 +3,25 @@
 //!
 //! A new RDP logon typically produces 1149 (auth) + 4624/10 + LSM 21; a
 //! reconnection produces 1149 + 4778 + LSM 25 (+ sometimes 4624/10). These
-//! arrive on different channels, in no guaranteed order. Observations with the
-//! same user + source IP and a compatible domain (see
-//! `events::domains_compatible`), within the correlation window, of the same
-//! class (establish / disconnect) and not repeating an event type already in
-//! the group are merged. A group is finalized once no new related event has
-//! arrived for `settle`, or after `max_hold` at the latest.
+//! arrive on different channels, in no guaranteed order. Observations of the
+//! same user with a compatible domain (see `events::domains_compatible`),
+//! within the correlation window, of the same class (establish / disconnect)
+//! and not repeating an event type already in the group are merged, preferring
+//! a group with the same source IP.
+//!
+//! The events of one session do not always report the same address (RD
+//! Gateway / NAT in front of the host, IPv4 vs IPv6 of a dual-stack client).
+//! So a group with a different IP is also joined, unless the session ID or
+//! logon ID of the two contradict each other. The 4624 address is then the
+//! Source IP and the others are listed separately.
+//!
+//! A group is finalized once no new related event has arrived for `settle`,
+//! or after `max_hold` at the latest.
 //!
 //! 1149 alone never produces a connection: authentication is not proof that a
 //! session was established. It is only attached as supporting evidence.
 
-use crate::events::{domains_compatible, normalize_domain, Observation, Signal};
+use crate::events::{domains_compatible, normalize_domain, Observation, Signal, CH_SECURITY};
 use chrono::{DateTime, Utc};
 use std::time::{Duration, Instant};
 
@@ -24,7 +32,7 @@ pub struct EventRef {
     pub time: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Connection {
     /// NewLogon, Reconnect or Disconnect.
     pub kind: Signal,
@@ -32,6 +40,8 @@ pub struct Connection {
     pub user: String,
     pub domain: String,
     pub ip: String,
+    /// Other source addresses reported by events of the same session.
+    pub other_ips: Vec<String>,
     pub session_id: Option<u32>,
     pub event_ids: Vec<u32>,
     pub refs: Vec<EventRef>,
@@ -47,12 +57,33 @@ impl Connection {
 
 struct Group {
     disconnect: bool,
-    key: String,
+    /// Lower-case user name.
+    user: String,
     /// Normalized domain of the group ("" until an event reports one).
     domain: String,
     obs: Vec<Observation>,
     first_arrival: Instant,
     last_arrival: Instant,
+}
+
+impl Group {
+    fn has_ip(&self, ip: &str) -> bool {
+        self.obs.iter().any(|x| x.ip == ip)
+    }
+
+    /// A known session ID or logon ID that differs from the group's.
+    fn conflicts(&self, o: &Observation) -> bool {
+        self.obs.iter().any(|x| {
+            matches!((x.session_id, o.session_id), (Some(a), Some(b)) if a != b)
+                || matches!((&x.logon_id, &o.logon_id), (Some(a), Some(b)) if a != b)
+        })
+    }
+
+    fn shares_id(&self, o: &Observation) -> bool {
+        self.obs.iter().any(|x| {
+            (x.session_id.is_some() && x.session_id == o.session_id) || (x.logon_id.is_some() && x.logon_id == o.logon_id)
+        })
+    }
 }
 
 pub struct Correlator {
@@ -95,25 +126,45 @@ impl Correlator {
             return;
         }
         let disconnect = o.signal == Signal::Disconnect;
-        let key = o.key();
+        let user = o.user.to_lowercase();
         let domain = normalize_domain(&o.domain, &self.host);
         let window = self.window;
-        let found = self.groups.iter_mut().find(|g| {
+        let candidate = |g: &Group| {
             g.disconnect == disconnect
-                && g.key == key
+                && g.user == user
                 && domains_compatible(&g.domain, &domain)
                 && !g.obs.iter().any(|x| x.channel == o.channel && x.event_id == o.event_id)
                 && g.obs.iter().any(|x| (x.time - o.time).abs() <= window)
-        });
-        match found {
-            Some(g) => {
+                && !g.conflicts(&o)
+        };
+        // Same address first, then a shared session / logon ID, then any
+        // other group of this account.
+        let idx = self
+            .groups
+            .iter()
+            .position(|g| candidate(g) && g.has_ip(&o.ip))
+            .or_else(|| self.groups.iter().position(|g| candidate(g) && g.shares_id(&o)))
+            .or_else(|| self.groups.iter().position(|g| candidate(g)));
+        match idx {
+            Some(i) => {
+                let g = &mut self.groups[i];
+                if !g.has_ip(&o.ip) {
+                    let ips: Vec<&str> = g.obs.iter().map(|x| x.ip.as_str()).collect();
+                    crate::logging::info(&format!(
+                        "event {} for {} from {} merged with the same session seen from {}",
+                        o.event_id,
+                        o.user,
+                        o.ip,
+                        ips.join(", ")
+                    ));
+                }
                 if g.domain.is_empty() {
                     g.domain = domain;
                 }
                 g.obs.push(o);
                 g.last_arrival = now;
             }
-            None => self.groups.push(Group { disconnect, key, domain, obs: vec![o], first_arrival: now, last_arrival: now }),
+            None => self.groups.push(Group { disconnect, user, domain, obs: vec![o], first_arrival: now, last_arrival: now }),
         }
     }
 
@@ -158,7 +209,8 @@ impl Correlator {
             let mut i = 0;
             while i < self.auths.len() {
                 let a = &self.auths[i].0;
-                if a.key() == g.key
+                if a.user.to_lowercase() == g.user
+                    && obs.iter().any(|o| o.ip == a.ip)
                     && domains_compatible(&g.domain, &normalize_domain(&a.domain, &self.host))
                     && (a.time - first).abs() <= window
                 {
@@ -182,13 +234,23 @@ impl Correlator {
             .min_by_key(|o| o.time)
             .expect("group has a session event")
             .clone();
+        // 4624 reports the address of the authenticating (NLA) client, so it
+        // wins when the events of the session disagree.
+        let ip = obs
+            .iter()
+            .find(|o| o.channel == CH_SECURITY && o.event_id == 4624)
+            .map(|o| o.ip.clone())
+            .unwrap_or_else(|| primary.ip.clone());
+        let mut other_ips: Vec<String> = obs.iter().filter(|o| o.ip != ip).map(|o| o.ip.clone()).collect();
+        other_ips.sort();
+        other_ips.dedup();
         let domain = obs.iter().map(|o| o.domain.clone()).find(|d| !d.is_empty()).unwrap_or_default();
         let session_id = obs.iter().find_map(|o| o.session_id);
         let mut event_ids: Vec<u32> = obs.iter().map(|o| o.event_id).collect();
         event_ids.sort_unstable();
         event_ids.dedup();
         let refs = obs.iter().map(|o| EventRef { channel: o.channel.clone(), record_id: o.record_id, time: o.time }).collect();
-        Connection { kind, time: primary.time, user: primary.user, domain, ip: primary.ip, session_id, event_ids, refs }
+        Connection { kind, time: primary.time, user: primary.user, domain, ip, other_ips, session_id, event_ids, refs }
     }
 }
 
@@ -298,6 +360,73 @@ mod tests {
         c.push(dot, now);
         c.push(obs(lsm(21, 2, T1, r"PC01\admin", "203.0.113.10", 3)), now);
         assert_eq!(c.flush_all(now).len(), 1);
+    }
+
+    #[test]
+    fn session_merges_across_addresses_by_session_id() {
+        // RD Gateway: 4624 shows the client, LSM 21 shows the gateway.
+        let mut c = Correlator::new(30, "PC01");
+        let now = Instant::now();
+        c.push(obs(lsm(21, 1, T0, r"CORP\jdoe", "10.0.0.1", 3)), now);
+        c.push(obs(logon4624(2, T1, "jdoe", "10.0.0.5", "10")), now);
+        let out = c.flush_all(now);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].ip, "10.0.0.5");
+        assert_eq!(out[0].other_ips, vec!["10.0.0.1".to_string()]);
+        // A later disconnect / reconnect of the same session from the gateway.
+        c.push(obs(lsm(25, 3, T2, r"CORP\jdoe", "10.0.0.1", 3)), now);
+        c.push(obs(lsm(25, 4, T2, r"CORP\jdoe", "10.0.0.9", 3)), now);
+        assert_eq!(c.flush_all(now).len(), 2, "repeated event type is a new connection");
+    }
+
+    #[test]
+    fn session_merges_across_addresses_by_logon_id() {
+        let mut c = Correlator::new(30, "PC01");
+        let now = Instant::now();
+        c.push(obs(session4778(4778, 1, T0, "jdoe", "10.0.0.1")), now);
+        c.push(obs(logon4624(2, T1, "jdoe", "10.0.0.5", "10")), now);
+        let out = c.flush_all(now);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].kind, out[0].ip.as_str()), (Signal::Reconnect, "10.0.0.5"));
+    }
+
+    #[test]
+    fn conflicting_session_ids_do_not_merge() {
+        let mut c = Correlator::new(30, "PC01");
+        let now = Instant::now();
+        c.push(obs(lsm(21, 1, T0, r"CORP\jdoe", "10.0.0.1", 3)), now);
+        c.push(obs(lsm(25, 2, T1, r"CORP\jdoe", "10.0.0.2", 4)), now);
+        assert_eq!(c.flush_all(now).len(), 2);
+        let mut a = obs(logon4624(3, T0, "jdoe", "10.0.0.1", "10"));
+        a.logon_id = Some("0x1".into());
+        let mut b = obs(session4778(4778, 4, T1, "jdoe", "10.0.0.2"));
+        b.logon_id = Some("0x2".into());
+        c.push(a, now);
+        c.push(b, now);
+        assert_eq!(c.flush_all(now).len(), 2);
+    }
+
+    #[test]
+    fn different_users_on_different_addresses_never_merge() {
+        let mut c = Correlator::new(30, "PC01");
+        let now = Instant::now();
+        c.push(obs(lsm(21, 1, T0, r"CORP\jdoe", "10.0.0.1", 3)), now);
+        c.push(obs(logon4624(2, T1, "asmith", "10.0.0.5", "10")), now);
+        assert_eq!(c.flush_all(now).len(), 2);
+    }
+
+    #[test]
+    fn ipv4_and_ipv6_of_one_client_merge() {
+        let mut c = Correlator::new(30, "PC01");
+        let now = Instant::now();
+        c.push(obs(rcm1149(1, T0, "jdoe", "2001:db8::5")), now);
+        c.push(obs(logon4624(2, T1, "jdoe", "2001:db8::5", "10")), now);
+        c.push(obs(lsm(21, 3, T2, r"CORP\jdoe", "10.0.0.5", 3)), now);
+        let out = c.flush_all(now);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].ip, "2001:db8::5");
+        assert_eq!(out[0].other_ips, vec!["10.0.0.5".to_string()]);
+        assert_eq!(out[0].event_ids, vec![21, 1149, 4624]);
     }
 
     #[test]

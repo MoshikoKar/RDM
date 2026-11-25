@@ -431,6 +431,7 @@ mod tests {
             session_id: Some(2),
             event_ids: vec![21, 4624],
             refs: vec![EventRef { channel: "Security".into(), record_id: 77, time: t }],
+            ..Default::default()
         }
     }
 

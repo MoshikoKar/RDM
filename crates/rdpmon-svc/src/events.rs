@@ -6,11 +6,12 @@ pub const CH_SECURITY: &str = "Security";
 pub const CH_LSM: &str = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational";
 pub const CH_RCM: &str = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Signal {
     /// 1149: network-level authentication succeeded. Not proof of a session.
     Auth,
     /// 4624 LogonType 10, LSM 21.
+    #[default]
     NewLogon,
     /// 4778, LSM 25.
     Reconnect,
@@ -29,15 +30,8 @@ pub struct Observation {
     pub domain: String,
     pub ip: String,
     pub session_id: Option<u32>,
-}
-
-impl Observation {
-    /// Correlation key: lower-case user name (without domain) + source IP.
-    /// The domain is compared separately (see `domains_compatible`) because
-    /// not every event reports it, or reports it in the same form.
-    pub fn key(&self) -> String {
-        format!("{}|{}", self.user.to_lowercase(), self.ip)
-    }
+    /// Windows logon ID (4624 TargetLogonId, 4778/4779 LogonID), lower case.
+    pub logon_id: Option<String>,
 }
 
 /// Canonical form of an account domain so the forms used by different events
@@ -96,15 +90,20 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
             .unwrap_or_default()
     };
 
+    let mut logon_id = None;
     let (signal, user, domain, ip, session_id) = match (channel.as_str(), event_id) {
         (CH_SECURITY, 4624) => {
             if data("LogonType") != "10" {
                 return Err(Skip::Irrelevant);
             }
+            logon_id = normalize_logon_id(&data("TargetLogonId"));
             (Signal::NewLogon, data("TargetUserName"), data("TargetDomainName"), data("IpAddress"), None)
         }
-        (CH_SECURITY, 4778) => (Signal::Reconnect, data("AccountName"), data("AccountDomain"), data("ClientAddress"), None),
-        (CH_SECURITY, 4779) => (Signal::Disconnect, data("AccountName"), data("AccountDomain"), data("ClientAddress"), None),
+        (CH_SECURITY, 4778 | 4779) => {
+            logon_id = normalize_logon_id(&data("LogonID"));
+            let sig = if event_id == 4778 { Signal::Reconnect } else { Signal::Disconnect };
+            (sig, data("AccountName"), data("AccountDomain"), data("ClientAddress"), None)
+        }
         (CH_RCM, 1149) => (Signal::Auth, user_data("Param1"), user_data("Param2"), user_data("Param3"), None),
         (CH_LSM, 21 | 24 | 25) => {
             let sig = match event_id {
@@ -122,7 +121,12 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
     if !is_relevant_user(&user, &domain) || ip.is_empty() || (ignore_loopback && is_loopback(&ip)) {
         return Err(Skip::Irrelevant);
     }
-    Ok(Observation { channel, record_id, event_id, time, signal, user, domain, ip, session_id })
+    Ok(Observation { channel, record_id, event_id, time, signal, user, domain, ip, session_id, logon_id })
+}
+
+fn normalize_logon_id(s: &str) -> Option<String> {
+    let s = s.trim().to_ascii_lowercase();
+    (!s.is_empty() && s != "-" && s != "0x0").then_some(s)
 }
 
 /// Excludes built-in service identities (identified by their domain, which a
@@ -258,6 +262,8 @@ mod tests {
     fn parses_reconnect_disconnect_and_lsm() {
         let r = parse(&session4778(4778, 7, T, "jdoe", "::ffff:198.51.100.25"), true).unwrap();
         assert_eq!((r.signal, r.ip.as_str()), (Signal::Reconnect, "198.51.100.25"));
+        assert_eq!(r.logon_id.as_deref(), Some("0x3e7a1"));
+        assert_eq!(parse(&logon4624(1, T, "jdoe", "198.51.100.25", "10"), true).unwrap().logon_id.as_deref(), Some("0x3e7a1"));
         assert_eq!(parse(&session4778(4779, 8, T, "jdoe", "198.51.100.25"), true).unwrap().signal, Signal::Disconnect);
         let l = parse(&lsm(25, 9, T, r"CORP\jdoe", "198.51.100.25", 4), true).unwrap();
         assert_eq!((l.signal, l.user.as_str(), l.domain.as_str(), l.session_id), (Signal::Reconnect, "jdoe", "CORP", Some(4)));
