@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub type Result<T> = rusqlite::Result<T>;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 pub const KV_INITIALIZED: &str = "initialized";
 
 pub fn ts(t: DateTime<Utc>) -> String {
@@ -28,6 +28,9 @@ pub fn kind_name(k: Signal) -> &'static str {
         Signal::Reconnect => "reconnect",
         Signal::Disconnect => "disconnect",
         Signal::Auth => "auth",
+        Signal::Failed => "failed",
+        Signal::ShareAccess => "share",
+        Signal::ShareDenied => "share_denied",
     }
 }
 
@@ -50,6 +53,17 @@ pub struct Message {
     pub subject: String,
     pub text: String,
     pub html: String,
+}
+
+/// Share access in a period, grouped by type, account, IP and share.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShareRow {
+    pub kind: String,
+    pub user: String,
+    pub domain: String,
+    pub ip: String,
+    pub share: String,
+    pub count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +136,15 @@ impl Db {
                  COMMIT;",
             )?;
         }
+        if v < 2 {
+            self.conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE connections ADD COLUMN share TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE connections ADD COLUMN path TEXT NOT NULL DEFAULT '';
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+        }
         Ok(())
     }
 
@@ -147,12 +170,15 @@ impl Db {
     }
 
     /// Records a finalized connection atomically: history row, processed
-    /// event ids, cooldown state and (optionally) a queued notification.
-    /// Returns the connection id and whether an older queued item was dropped.
+    /// event ids, cooldown state (under `cooldown_key`) and (optionally) a
+    /// queued notification. Returns the connection id and whether an older
+    /// queued item was dropped.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_connection(
         &mut self,
         c: &Connection,
         hostname: &str,
+        cooldown_key: &str,
         recovered: bool,
         status: &str,
         message: Option<Message>,
@@ -162,9 +188,9 @@ impl Db {
         let tx = self.conn.transaction()?;
         let ids = c.event_ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
         tx.execute(
-            "INSERT INTO connections (kind, event_time, hostname, username, domain, source_ip, session_id, event_ids, recovered, notify_status)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![kind_name(c.kind), ts(c.time), hostname, c.user, c.domain, c.ip, c.session_id, ids, recovered, status],
+            "INSERT INTO connections (kind, event_time, hostname, username, domain, source_ip, session_id, event_ids, recovered, notify_status, share, path)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![kind_name(c.kind), ts(c.time), hostname, c.user, c.domain, c.ip, c.session_id, ids, recovered, status, c.share, c.path],
         )?;
         let conn_id = tx.last_insert_rowid();
         for r in &c.refs {
@@ -177,7 +203,7 @@ impl Db {
         if let Some(m) = message {
             tx.execute(
                 "INSERT INTO cooldown (key, last_time) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET last_time=excluded.last_time",
-                params![c.key(hostname), ts(c.time)],
+                params![cooldown_key, ts(c.time)],
             )?;
             dropped = enqueue_tx(&tx, "alert", &format!("conn:{conn_id}"), Some(conn_id), &m, max_queue)?;
         }
@@ -197,6 +223,35 @@ impl Db {
                 user: r.get(2)?,
                 domain: r.get(3)?,
                 ip: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Failed logons in the period: (attempts, distinct source IPs).
+    pub fn failed_between(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<(u64, u64)> {
+        self.conn.query_row(
+            "SELECT count(*), count(DISTINCT source_ip) FROM connections WHERE event_time >= ?1 AND event_time < ?2 AND kind='failed'",
+            params![ts(start), ts(end)],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+        )
+    }
+
+    pub fn shares_between(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Vec<ShareRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT kind, username, domain, source_ip, share, count(*) FROM connections
+             WHERE event_time >= ?1 AND event_time < ?2 AND kind IN ('share','share_denied')
+             GROUP BY kind, lower(domain), lower(username), source_ip, lower(share)
+             ORDER BY count(*) DESC, username LIMIT 200",
+        )?;
+        let rows = st.query_map(params![ts(start), ts(end)], |r| {
+            Ok(ShareRow {
+                kind: r.get(0)?,
+                user: r.get(1)?,
+                domain: r.get(2)?,
+                ip: r.get(3)?,
+                share: r.get(4)?,
+                count: r.get::<_, i64>(5)? as u64,
             })
         })?;
         rows.collect()
@@ -445,12 +500,12 @@ mod tests {
         let t = Utc::now();
         let c = conn("jdoe", t);
         assert!(!db.is_processed("Security", 77, t).unwrap());
-        db.record_connection(&c, "PC01", false, "queued", Some(msg()), 100).unwrap();
+        db.record_connection(&c, "PC01", &c.key("PC01"), false, "queued", Some(msg()), 100).unwrap();
         assert!(db.is_processed("Security", 77, t).unwrap());
         assert!(!db.is_processed("Security", 77, t + Duration::seconds(1)).unwrap(), "cleared log reusing ids is not a duplicate");
         assert_eq!(db.cooldown_last(&c.key("PC01")).unwrap().map(ts), Some(ts(t)));
         assert_eq!(db.outbox_counts().unwrap(), (1, 0));
-        db.record_connection(&conn("asmith", t), "PC01", false, "cooldown", None, 100).unwrap();
+        db.record_connection(&conn("asmith", t), "PC01", "k", false, "cooldown", None, 100).unwrap();
         assert_eq!(db.outbox_counts().unwrap(), (1, 0));
         assert_eq!(db.recent_history(10).unwrap().len(), 2);
         assert_eq!(db.connections_between(t - Duration::hours(1), t + Duration::hours(1)).unwrap().len(), 2);
@@ -463,12 +518,64 @@ mod tests {
         let corp = conn("admin", t);
         let mut local = conn("admin", t);
         local.domain = "PC01".into();
-        db.record_connection(&corp, "PC01", false, "queued", Some(msg()), 100).unwrap();
+        db.record_connection(&corp, "PC01", &corp.key("PC01"), false, "queued", Some(msg()), 100).unwrap();
         assert!(db.cooldown_last(&corp.key("PC01")).unwrap().is_some());
         assert!(db.cooldown_last(&local.key("PC01")).unwrap().is_none(), "local account is not in cooldown");
         let mut fqdn = conn("Admin", t);
         fqdn.domain = "corp.local".into();
         assert!(db.cooldown_last(&fqdn.key("PC01")).unwrap().is_some(), "same account, other domain form");
+    }
+
+    #[test]
+    fn failed_logons_are_counted_but_not_listed_as_connections() {
+        let mut db = Db::memory();
+        let t = Utc::now();
+        for (i, ip) in ["198.51.100.7", "198.51.100.7", "203.0.113.9"].iter().enumerate() {
+            let mut f = conn("admin", t);
+            f.kind = Signal::Failed;
+            f.ip = ip.to_string();
+            f.refs[0].record_id = 100 + i as u64;
+            db.record_connection(&f, "PC01", &format!("failed|{ip}"), false, "n/a", None, 10).unwrap();
+        }
+        let range = (t - Duration::hours(1), t + Duration::hours(1));
+        assert_eq!(db.failed_between(range.0, range.1).unwrap(), (3, 2));
+        assert!(db.connections_between(range.0, range.1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn share_history_and_schema_upgrade() {
+        let mut db = Db::memory();
+        let t = Utc::now();
+        for (i, (kind, share)) in [(Signal::ShareAccess, r"\\*\C$"), (Signal::ShareAccess, r"\\*\c$"), (Signal::ShareDenied, r"\\*\Finance")].iter().enumerate() {
+            let mut s = conn("jdoe", t);
+            s.kind = *kind;
+            s.share = share.to_string();
+            s.refs[0].record_id = 200 + i as u64;
+            db.record_connection(&s, "PC01", "k", false, "n/a", None, 10).unwrap();
+        }
+        let rows = db.shares_between(t - Duration::hours(1), t + Duration::hours(1)).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].kind.as_str(), rows[0].count), ("share", 2));
+        // A version 1 database gains the new columns.
+        let dir = std::env::temp_dir().join(format!("rdpmon-test-{}", rdpmon_core::crypto::random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        {
+            // Turn a current database back into the version 1 layout.
+            let old = Db::open(&path).unwrap();
+            old.conn
+                .execute_batch(
+                    "DROP INDEX IF EXISTS ix_connections_user_ip;
+                     ALTER TABLE connections DROP COLUMN share;
+                     ALTER TABLE connections DROP COLUMN path;
+                     PRAGMA user_version = 1;",
+                )
+                .unwrap();
+        }
+        let mut db = Db::open(&path).unwrap();
+        db.record_connection(&conn("jdoe", t), "PC01", "k", false, "n/a", None, 10).unwrap();
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -516,8 +623,8 @@ mod tests {
     fn retention_cleanup() {
         let mut db = Db::memory();
         let old = Utc::now() - Duration::days(400);
-        db.record_connection(&conn("old", old), "PC", false, "n/a", None, 10).unwrap();
-        db.record_connection(&conn("new", Utc::now()), "PC", false, "n/a", None, 10).unwrap();
+        db.record_connection(&conn("old", old), "PC", "k1", false, "n/a", None, 10).unwrap();
+        db.record_connection(&conn("new", Utc::now()), "PC", "k2", false, "n/a", None, 10).unwrap();
         db.audit("admin", "x", "y").unwrap();
         db.cleanup(&RetentionConfig::default(), Utc::now()).unwrap();
         let h = db.recent_history(10).unwrap();

@@ -123,6 +123,46 @@ impl Default for MonitoringConfig {
     }
 }
 
+/// Alerts on repeated failed logons (4625, LogonType 3 or 10) from one IP.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FailedLogonConfig {
+    /// Off by default; the 4625 subscription exists only when enabled.
+    pub enabled: bool,
+    /// Failures from one IP within the window that trigger an alert.
+    pub threshold: u32,
+    pub window_minutes: u32,
+}
+
+impl Default for FailedLogonConfig {
+    fn default() -> Self {
+        Self { enabled: false, threshold: 5, window_minutes: 5 }
+    }
+}
+
+/// Access to this computer's shared folders (Security 5140 / 5145 / 4625).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SmbConfig {
+    /// Off by default; no share events are subscribed unless enabled.
+    pub enabled: bool,
+    /// Email on successful share access (5140).
+    pub notify_success: bool,
+    /// Email on denied share access (5145 / 5140 failure) and enable the
+    /// failed-logon alert (4625) for network logons.
+    pub notify_failed: bool,
+    /// Share names (e.g. "IPC$", "print$") never emailed; still recorded.
+    pub exclude_shares: Vec<String>,
+    /// Email only for shares whose name ends with '$' (C$, ADMIN$, ...).
+    pub admin_shares_only: bool,
+}
+
+impl Default for SmbConfig {
+    fn default() -> Self {
+        Self { enabled: false, notify_success: true, notify_failed: true, exclude_shares: Vec::new(), admin_shares_only: false }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReportConfig {
@@ -207,6 +247,8 @@ pub struct Config {
     pub smtp: SmtpConfig,
     pub notifications: NotificationConfig,
     pub monitoring: MonitoringConfig,
+    pub failed_logons: FailedLogonConfig,
+    pub smb: SmbConfig,
     pub report: ReportConfig,
     pub retention: RetentionConfig,
     pub security: SecurityConfig,
@@ -216,6 +258,12 @@ pub struct Config {
 impl Config {
     pub fn from_toml(text: &str) -> Result<Self, String> {
         toml::from_str(text).map_err(|e| format!("Invalid configuration: {e}"))
+    }
+
+    /// Failed logons (4625) are watched for the failed-logon alert itself or
+    /// for failed access to shared folders.
+    pub fn failed_logons_active(&self) -> bool {
+        self.failed_logons.enabled || (self.smb.enabled && self.smb.notify_failed)
     }
 
     pub fn to_toml(&self) -> String {
@@ -293,6 +341,18 @@ impl Config {
         }
         if !(5..=300).contains(&m.correlation_window_seconds) {
             errs.push("Correlation window must be between 5 and 300 seconds.".into());
+        }
+        let f = &self.failed_logons;
+        if !(1..=1000).contains(&f.threshold) {
+            errs.push("Failed logon threshold must be between 1 and 1000.".into());
+        }
+        if !(1..=1440).contains(&f.window_minutes) {
+            errs.push("Failed logon window must be between 1 and 1440 minutes.".into());
+        }
+        for s in &self.smb.exclude_shares {
+            if s.trim().is_empty() || s.len() > 80 || has_control(s) || s.contains('\\') {
+                errs.push(format!("Excluded share '{s}' must be a share name such as IPC$ (1-80 characters, no backslash)."));
+            }
         }
         let r = &self.report;
         if parse_weekday(&r.day).is_none() {
@@ -468,8 +528,21 @@ mod tests {
         c.notifications.subject_format = "line1\r\nBcc: evil@example.com".into();
         c.updates.provider = UpdateProvider::Github;
         c.updates.repository_url = "http://github.com/a/b".into();
+        c.failed_logons.threshold = 0;
+        c.failed_logons.window_minutes = 0;
+        c.smb.exclude_shares = vec![r"\\host\C$".into()];
         let errs = c.validate().unwrap_err();
-        assert!(errs.len() >= 7, "{errs:?}");
+        assert!(errs.len() >= 10, "{errs:?}");
+    }
+
+    #[test]
+    fn failed_logons_follow_smb() {
+        let mut c = Config::default();
+        assert!(!c.failed_logons_active());
+        c.smb.enabled = true;
+        assert!(c.failed_logons_active());
+        c.smb.notify_failed = false;
+        assert!(!c.failed_logons_active());
     }
 
     #[test]

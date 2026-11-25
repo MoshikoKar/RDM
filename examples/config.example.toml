@@ -36,6 +36,18 @@ ignore_loopback = false          # true = ignore 127.0.0.1 / ::1 (tunnelled RDP 
 recovery_max_hours = 168         # after a restart, recover missed events up to 7 days old
 correlation_window_seconds = 30  # events of one connection arrive within this window
 
+[failed_logons]
+enabled = false                  # email when one source IP fails to log on repeatedly (Security 4625)
+threshold = 5                    # failures from one IP within the window that trigger an email
+window_minutes = 5
+
+[smb]                            # access to this computer's shared folders (C$, ADMIN$, regular shares)
+enabled = false                  # needs auditing: "File Share" success, "Detailed File Share" failure, "Logon" failure
+notify_success = true            # email on successful share access (5140, once per session per share)
+notify_failed = true             # email on denied access (5145 failure) and on failed network logons (4625, [failed_logons] threshold)
+exclude_shares = []              # e.g. ["IPC$", "print$"]: never emailed, still recorded in history
+admin_shares_only = false        # true = email only for shares ending in $
+
 [report]
 enabled = true
 day = "monday"

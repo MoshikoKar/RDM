@@ -81,6 +81,39 @@ Undelivered emails are queued in SQLite and retried with exponential backoff
 > Session Manager events still detect reconnections.
 > `auditpol /set /subcategory:"Other Logon/Logoff Events" /success:enable`
 
+### Optional alerts (all off by default)
+
+**Failed logons** (`[failed_logons]`): subscribes to Security 4625 with
+LogonType 3 or 10. With NLA (the default) a wrong RDP password is logged as a
+*network* (type 3) logon, so the count also includes failed file-share and other
+network logons, and the email says "Failed logon", not "RDP". Each attempt is
+stored in history; an email is sent when one source IP reaches `threshold`
+failures within `window_minutes` (default 5 in 5 min), then at most once per IP
+per quiet period (never more often than the window). The weekly report shows the
+total. Needs *Audit Logon* failure auditing, which Windows enables by default:
+`auditpol /set /subcategory:"Logon" /failure:enable`
+
+**Shared folders (SMB)** (`[smb]`): reports access to this computer's shares,
+admin shares (`C$`, `ADMIN$`) and regular ones alike, from other machines.
+
+| Case | Event | Email |
+|---|---|---|
+| Share opened | 5140 (once per session per share) | "Share access" with user, IP, hostname, share |
+| Valid account, no permission | 5145 *failure only* (filtered in the event log service) | "Share access denied" with the path |
+| Wrong password | 4625 LogonType 3 | "Failed logon", same threshold as above |
+
+One email per account + IP + share per quiet period. `exclude_shares` (e.g.
+`IPC$`, `print$`) and `admin_shares_only` only suppress the email; every event is
+still recorded in history, and the weekly report lists share access per user, IP
+and share. Account names are not filtered (an account named `x$` still alerts).
+Prerequisites - the status page shows a warning when one is missing:
+
+```
+auditpol /set /subcategory:"File Share" /success:enable
+auditpol /set /subcategory:"Detailed File Share" /failure:enable   # never /success: one event per file
+auditpol /set /subcategory:"Logon" /failure:enable
+```
+
 ## Troubleshoot
 
 ```powershell

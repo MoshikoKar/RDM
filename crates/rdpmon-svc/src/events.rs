@@ -17,7 +17,23 @@ pub enum Signal {
     Reconnect,
     /// 4779, LSM 24 (history only).
     Disconnect,
+    /// 4625 LogonType 3 or 10: failed logon. Never correlated into a session.
+    Failed,
+    /// 5140 (success): a shared folder was opened.
+    ShareAccess,
+    /// 5145 / 5140 with the Audit Failure keyword: share access denied.
+    ShareDenied,
 }
+
+impl Signal {
+    /// Events handled outside the RDP session correlation.
+    pub fn is_standalone(self) -> bool {
+        matches!(self, Signal::Failed | Signal::ShareAccess | Signal::ShareDenied)
+    }
+}
+
+/// Audit Failure bit of the event Keywords.
+const KEYWORD_AUDIT_FAILURE: u64 = 0x0010_0000_0000_0000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Observation {
@@ -32,6 +48,14 @@ pub struct Observation {
     pub session_id: Option<u32>,
     /// Windows logon ID (4624 TargetLogonId, 4778/4779 LogonID), lower case.
     pub logon_id: Option<String>,
+    /// 4625 only: LogonType.
+    pub logon_type: String,
+    /// 4625 only: SubStatus, or Status when SubStatus is 0x0 (lower case).
+    pub status: String,
+    /// 5140 / 5145: share as logged (e.g. `\\*\C$`).
+    pub share: String,
+    /// 5145: file or folder inside the share.
+    pub path: String,
 }
 
 /// Canonical form of an account domain so the forms used by different events
@@ -91,7 +115,32 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
     };
 
     let mut logon_id = None;
+    let (mut logon_type, mut status) = (String::new(), String::new());
+    let (mut share, mut path) = (String::new(), String::new());
     let (signal, user, domain, ip, session_id) = match (channel.as_str(), event_id) {
+        (CH_SECURITY, 5140 | 5145) => {
+            let kw = text(child(system, "Keywords"));
+            let kw = u64::from_str_radix(kw.trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0);
+            let failure = kw & KEYWORD_AUDIT_FAILURE != 0;
+            if event_id == 5145 && !failure {
+                return Err(Skip::Irrelevant); // per-file success auditing: far too noisy
+            }
+            share = one_line(&data("ShareName"), 260);
+            if event_id == 5145 {
+                path = one_line(&data("RelativeTargetName"), 260);
+            }
+            let sig = if failure { Signal::ShareDenied } else { Signal::ShareAccess };
+            (sig, data("SubjectUserName"), data("SubjectDomainName"), data("IpAddress"), None)
+        }
+        (CH_SECURITY, 4625) => {
+            logon_type = data("LogonType");
+            if logon_type != "3" && logon_type != "10" {
+                return Err(Skip::Irrelevant);
+            }
+            let sub_status = data("SubStatus").to_ascii_lowercase();
+            status = if sub_status.is_empty() || sub_status == "0x0" { data("Status").to_ascii_lowercase() } else { sub_status };
+            (Signal::Failed, data("TargetUserName"), data("TargetDomainName"), data("IpAddress"), None)
+        }
         (CH_SECURITY, 4624) => {
             if data("LogonType") != "10" {
                 return Err(Skip::Irrelevant);
@@ -118,10 +167,18 @@ pub fn parse(xml: &str, ignore_loopback: bool) -> Result<Observation, Skip> {
     };
 
     let ip = normalize_ip(&ip);
-    if !is_relevant_user(&user, &domain) || ip.is_empty() || (ignore_loopback && is_loopback(&ip)) {
+    // A failed logon may name no (or a nonsense) account; only built-in
+    // identities are excluded.
+    let relevant = if signal == Signal::Failed { !is_builtin_domain(&domain) } else { is_relevant_user(&user, &domain) };
+    if !relevant || ip.is_empty() || (ignore_loopback && is_loopback(&ip)) {
         return Err(Skip::Irrelevant);
     }
-    Ok(Observation { channel, record_id, event_id, time, signal, user, domain, ip, session_id, logon_id })
+    let (user, domain) = (one_line(&user, 256), one_line(&domain, 256));
+    Ok(Observation { channel, record_id, event_id, time, signal, user, domain, ip, session_id, logon_id, logon_type, status, share, path })
+}
+
+fn one_line(s: &str, max: usize) -> String {
+    s.chars().filter(|c| !c.is_control()).take(max).collect()
 }
 
 fn normalize_logon_id(s: &str) -> Option<String> {
@@ -136,8 +193,11 @@ fn normalize_logon_id(s: &str) -> Option<String> {
 /// (LogonType 10, session reconnects, remote session-manager logons).
 pub fn is_relevant_user(user: &str, domain: &str) -> bool {
     let u = user.trim();
-    let d = domain.trim().to_ascii_lowercase();
-    !(u.is_empty() || u == "-" || matches!(d.as_str(), "nt authority" | "window manager" | "font driver host"))
+    !(u.is_empty() || u == "-" || is_builtin_domain(domain))
+}
+
+fn is_builtin_domain(domain: &str) -> bool {
+    matches!(domain.trim().to_ascii_lowercase().as_str(), "nt authority" | "window manager" | "font driver host")
 }
 
 /// Returns "" for values that are not a remote address at all ("-",
@@ -192,6 +252,30 @@ pub mod samples {
         ])
     }
 
+    pub fn failed4625(rec: u64, time: &str, user: &str, ip: &str, logon_type: &str, sub_status: &str) -> String {
+        security(4625, rec, time, &[
+            ("SubjectUserSid", "S-1-0-0"), ("TargetUserName", user), ("TargetDomainName", "CORP"),
+            ("Status", "0xc000006d"), ("FailureReason", "%%2313"), ("SubStatus", sub_status),
+            ("LogonType", logon_type), ("WorkstationName", "KALI"), ("IpAddress", ip), ("IpPort", "0"),
+        ])
+    }
+
+    /// 5140 / 5145 with the success or failure audit keyword.
+    pub fn share_event(id: u32, rec: u64, time: &str, user: &str, ip: &str, share: &str, path: &str, failure: bool) -> String {
+        let kw = if failure { "0x8010000000000000" } else { "0x8020000000000000" };
+        format!(
+            "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System>\
+             <Provider Name='Microsoft-Windows-Security-Auditing'/><EventID>{id}</EventID><Keywords>{kw}</Keywords>\
+             <TimeCreated SystemTime='{time}'/><EventRecordID>{rec}</EventRecordID>\
+             <Channel>Security</Channel><Computer>PC01.corp.local</Computer></System><EventData>\
+             <Data Name='SubjectUserSid'>S-1-5-21-1</Data><Data Name='SubjectUserName'>{user}</Data>\
+             <Data Name='SubjectDomainName'>CORP</Data><Data Name='SubjectLogonId'>0x5a1b2</Data>\
+             <Data Name='ObjectType'>File</Data><Data Name='IpAddress'>{ip}</Data><Data Name='IpPort'>50112</Data>\
+             <Data Name='ShareName'>{share}</Data><Data Name='ShareLocalPath'>\\??\\C:\\</Data>\
+             <Data Name='RelativeTargetName'>{path}</Data><Data Name='AccessMask'>0x1</Data></EventData></Event>"
+        )
+    }
+
     pub fn session4778(id: u32, rec: u64, time: &str, user: &str, ip: &str) -> String {
         security(id, rec, time, &[
             ("AccountName", user), ("AccountDomain", "CORP"), ("LogonID", "0x3e7a1"),
@@ -244,6 +328,32 @@ mod tests {
         assert!(parse(&logon4624(1, T, "jdoe", "127.0.0.1", "10"), false).is_ok());
         assert_eq!(parse(&lsm(21, 5, T, r"CORP\jdoe", "LOCAL", 1), true), Err(Skip::Irrelevant));
         assert!(matches!(parse("<not-xml", true), Err(Skip::Malformed(_))));
+    }
+
+    #[test]
+    fn parses_4625_network_and_rdp() {
+        let f = parse(&failed4625(5, T, "administrator", "198.51.100.7", "3", "0xC000006A"), true).unwrap();
+        assert_eq!((f.signal, f.user.as_str(), f.ip.as_str()), (Signal::Failed, "administrator", "198.51.100.7"));
+        assert_eq!((f.logon_type.as_str(), f.status.as_str()), ("3", "0xc000006a"));
+        let r = parse(&failed4625(6, T, "jdoe", "198.51.100.7", "10", "0x0"), true).unwrap();
+        assert_eq!(r.status, "0xc000006d", "Status used when SubStatus is 0x0");
+        assert_eq!(parse(&failed4625(7, T, "jdoe", "198.51.100.7", "2", "0xc000006a"), true), Err(Skip::Irrelevant), "interactive ignored");
+        assert_eq!(parse(&failed4625(8, T, "jdoe", "-", "3", "0xc000006a"), true), Err(Skip::Irrelevant), "no address");
+        assert_eq!(parse(&failed4625(9, T, "jdoe", "::1", "3", "0xc000006a"), true), Err(Skip::Irrelevant));
+        assert!(parse(&failed4625(9, T, "jdoe", "::1", "3", "0xc000006a"), false).is_ok());
+        assert!(parse(&failed4625(10, T, "", "198.51.100.7", "3", "0xc0000064"), true).is_ok(), "empty user name still counts");
+    }
+
+    #[test]
+    fn parses_share_events() {
+        let a = parse(&share_event(5140, 11, T, "jdoe", "10.10.1.222", r"\\*\C$", "", false), true).unwrap();
+        assert_eq!((a.signal, a.share.as_str(), a.ip.as_str(), a.user.as_str()), (Signal::ShareAccess, r"\\*\C$", "10.10.1.222", "jdoe"));
+        let d = parse(&share_event(5145, 12, T, "jdoe", "10.10.1.222", r"\\*\Finance", r"2026\budget.xlsx", true), true).unwrap();
+        assert_eq!((d.signal, d.path.as_str()), (Signal::ShareDenied, r"2026\budget.xlsx"));
+        assert_eq!(parse(&share_event(5145, 13, T, "jdoe", "10.10.1.222", r"\\*\Finance", "x", false), true), Err(Skip::Irrelevant), "5145 success is never used");
+        assert_eq!(parse(&share_event(5140, 14, T, "jdoe", "10.10.1.222", r"\\*\C$", "", true), true).unwrap().signal, Signal::ShareDenied);
+        assert!(parse(&share_event(5140, 15, T, "PC02$", "10.10.1.5", r"\\*\IPC$", "", false), true).is_ok(), "machine-like names still count");
+        assert_eq!(parse(&share_event(5140, 16, T, "jdoe", "::1", r"\\*\C$", "", false), true), Err(Skip::Irrelevant));
     }
 
     #[test]

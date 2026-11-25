@@ -2,6 +2,7 @@
 //! through Windows Event Log subscriptions and sends email notifications.
 
 mod app;
+mod auditpol;
 mod auth;
 mod cli;
 mod correlate;
@@ -9,6 +10,7 @@ mod db;
 mod delivery;
 mod events;
 mod evt;
+mod failed;
 mod handler;
 mod ipc_server;
 mod logging;
