@@ -86,6 +86,15 @@ try {
     try {
         dotnet tool restore | Out-Null
         if ($LASTEXITCODE) { throw "dotnet tool restore failed" }
+        # WiX extensions live in the user's cache; fresh machines (CI) lack them.
+        $wixVer = (Get-Content .config\dotnet-tools.json -Raw | ConvertFrom-Json).tools.wix.version
+        $have = (dotnet wix extension list -g) -join "`n"
+        foreach ($ext in "WixToolset.UI.wixext", "WixToolset.Util.wixext") {
+            if ($have -notmatch [regex]::Escape("$ext $wixVer")) {
+                dotnet wix extension add -g "$ext/$wixVer"
+                if ($LASTEXITCODE) { throw "cannot add WiX extension $ext" }
+            }
+        }
         $installerDir = (Get-Location).Path
         dotnet wix build RDPMonitor.wxs -arch x64 `
             -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
